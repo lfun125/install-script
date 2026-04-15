@@ -27,6 +27,9 @@ DEPLOY_TOKEN=""
 COMPOSE_DIR=""
 ALLOWED_SERVICES="api,web,worker,gateway"
 GITHUB_MIRROR=""
+LOCAL_PACKAGE=""
+DOWNLOAD_ARCH=""
+OUTPUT_DIR="."
 ACTION=""
 
 #===============================================
@@ -38,6 +41,7 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
 
 用法:
     $0 install [选项]    安装 webhook
+    $0 download [选项]   在本机下载 webhook tar.gz（国内可配合 --mirror，下载后 scp 到服务器）
     $0 uninstall         卸载 webhook
     $0 status            查看状态
     $0 help              显示帮助
@@ -49,6 +53,12 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
     -d, --dir DIR             docker-compose 目录 (默认: /home/USER)
     -s, --services SERVICES   允许的服务名，逗号分隔 (默认: api,web,worker,gateway)
     -m, --mirror URL          GitHub 镜像加速前缀，国内推荐 https://ghfast.top
+    -l, --local PATH          使用本地 webhook tar.gz 文件安装（跳过下载）
+
+下载选项:
+    -a, --arch ARCH           目标架构: amd64 / arm64 / armhf (默认: amd64)
+    -o, --output DIR          输出目录 (默认: 当前目录)
+    -m, --mirror URL          GitHub 镜像加速前缀，国内推荐 https://ghfast.top
 
 示例:
     # 使用默认配置安装
@@ -59,6 +69,13 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
 
     # 国内使用镜像加速安装
     $0 install --mirror https://ghfast.top
+
+    # 在本机下载（国内推荐走镜像），之后 scp 到服务器
+    $0 download --mirror https://ghfast.top
+    $0 download --arch arm64 --output /tmp --mirror https://ghfast.top
+
+    # 服务器使用本地 tar.gz 安装（不下载）
+    $0 install --local /tmp/webhook-linux-amd64.tar.gz
 
     # 指定所有参数
     $0 install --user apiuser --port 9000 --token mytoken123 --dir /opt/app --services "api,web"
@@ -75,9 +92,17 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
-            install|uninstall|status|help)
+            install|uninstall|status|help|download)
                 ACTION="$1"
                 shift
+                ;;
+            -a|--arch)
+                DOWNLOAD_ARCH="$2"
+                shift 2
+                ;;
+            -o|--output)
+                OUTPUT_DIR="$2"
+                shift 2
                 ;;
             -u|--user)
                 WEBHOOK_USER="$2"
@@ -101,6 +126,10 @@ parse_args() {
                 ;;
             -m|--mirror)
                 GITHUB_MIRROR="${2%/}"
+                shift 2
+                ;;
+            -l|--local)
+                LOCAL_PACKAGE="$2"
                 shift 2
                 ;;
             -h|--help)
@@ -164,6 +193,54 @@ do_status() {
         fi
     done
     
+    echo ""
+}
+
+#===============================================
+# 下载（在本机执行，无需 root）
+#===============================================
+do_download() {
+    local arch="${DOWNLOAD_ARCH:-amd64}"
+    case "$arch" in
+        amd64|arm64|armhf) ;;
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        armv7l)  arch="armhf" ;;
+        *) error "不支持的架构: $arch (支持: amd64/arm64/armhf)" ;;
+    esac
+
+    if [[ ! -d "$OUTPUT_DIR" ]]; then
+        error "输出目录不存在: $OUTPUT_DIR"
+    fi
+
+    info "查询 webhook 最新版本..."
+    if [[ -n "$GITHUB_MIRROR" ]]; then
+        info "使用镜像加速: $GITHUB_MIRROR"
+    fi
+    local version
+    version=$(curl -s ${GITHUB_MIRROR:+${GITHUB_MIRROR}/}https://api.github.com/repos/adnanh/webhook/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+
+    if [[ -z "$version" ]]; then
+        error "无法获取最新版本信息"
+    fi
+    info "最新版本: $version"
+
+    local filename="webhook-linux-${arch}.tar.gz"
+    local url="${GITHUB_MIRROR:+${GITHUB_MIRROR}/}https://github.com/adnanh/webhook/releases/download/${version}/${filename}"
+    local output="${OUTPUT_DIR%/}/${filename}"
+
+    info "下载到: $output"
+    curl -L --fail -o "$output" "$url" || error "下载失败: $url"
+
+    echo ""
+    info "下载完成"
+    echo "  文件: $output"
+    echo "  版本: $version"
+    echo "  架构: $arch"
+    echo ""
+    echo "上传到服务器并安装:"
+    echo "  scp \"$output\" root@YOUR_SERVER:/tmp/"
+    echo "  ssh root@YOUR_SERVER 'bash install-webhook.sh install --local /tmp/${filename}'"
     echo ""
 }
 
@@ -249,35 +326,7 @@ do_install() {
         chown "${WEBHOOK_USER}:${WEBHOOK_USER}" "$COMPOSE_DIR"
     fi
     
-    # 获取最新版本
-    info "检查 webhook 最新版本..."
-    if [[ -n "$GITHUB_MIRROR" ]]; then
-        info "使用镜像加速: $GITHUB_MIRROR"
-    fi
-    LATEST_VERSION=$(curl -s ${GITHUB_MIRROR:+${GITHUB_MIRROR}/}https://api.github.com/repos/adnanh/webhook/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
-    
-    if [[ -z "$LATEST_VERSION" ]]; then
-        error "无法获取最新版本信息"
-    fi
-    
-    info "最新版本: $LATEST_VERSION"
-    
-    # 检查是否已安装
-    if command -v webhook &> /dev/null; then
-        CURRENT_VERSION=$(webhook -version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-        info "当前已安装版本: $CURRENT_VERSION"
-        
-        if [[ "$CURRENT_VERSION" == "${LATEST_VERSION#v}" ]]; then
-            warn "已是最新版本，是否继续重新安装？[y/N]"
-            read -r CONTINUE
-            if [[ ! "$CONTINUE" =~ ^[Yy]$ ]]; then
-                info "取消安装"
-                exit 0
-            fi
-        fi
-    fi
-    
-    # 下载安装
+    # 检测架构
     ARCH=$(uname -m)
     case $ARCH in
         x86_64)  ARCH="amd64" ;;
@@ -285,20 +334,71 @@ do_install() {
         armv7l)  ARCH="armhf" ;;
         *)       error "不支持的架构: $ARCH" ;;
     esac
-    
-    DOWNLOAD_URL="${GITHUB_MIRROR:+${GITHUB_MIRROR}/}https://github.com/adnanh/webhook/releases/download/${LATEST_VERSION}/webhook-linux-${ARCH}.tar.gz"
+
     TMP_DIR=$(mktemp -d)
-    
-    info "下载 webhook..."
-    curl -L -o "${TMP_DIR}/webhook.tar.gz" "$DOWNLOAD_URL" || error "下载失败"
-    
-    info "解压安装..."
-    tar -xzf "${TMP_DIR}/webhook.tar.gz" -C "${TMP_DIR}"
-    mv "${TMP_DIR}/webhook-linux-${ARCH}/webhook" /usr/local/bin/webhook
-    chmod +x /usr/local/bin/webhook
-    
+
+    if [[ -n "$LOCAL_PACKAGE" ]]; then
+        # 本地安装分支
+        if [[ ! -f "$LOCAL_PACKAGE" ]]; then
+            error "本地文件不存在: $LOCAL_PACKAGE"
+        fi
+        info "使用本地包安装: $LOCAL_PACKAGE"
+        LATEST_VERSION="local"
+
+        info "解压安装..."
+        tar -xzf "$LOCAL_PACKAGE" -C "${TMP_DIR}" || error "解压失败，请确认是 webhook-linux-*.tar.gz"
+
+        # 兼容不同架构目录名，自动查找 webhook 可执行文件
+        WEBHOOK_BIN=$(find "${TMP_DIR}" -type f -name webhook | head -n 1)
+        if [[ -z "$WEBHOOK_BIN" ]]; then
+            rm -rf "${TMP_DIR}"
+            error "在压缩包中未找到 webhook 可执行文件"
+        fi
+        mv "$WEBHOOK_BIN" /usr/local/bin/webhook
+        chmod +x /usr/local/bin/webhook
+    else
+        # 下载安装分支
+        info "检查 webhook 最新版本..."
+        if [[ -n "$GITHUB_MIRROR" ]]; then
+            info "使用镜像加速: $GITHUB_MIRROR"
+        fi
+        LATEST_VERSION=$(curl -s ${GITHUB_MIRROR:+${GITHUB_MIRROR}/}https://api.github.com/repos/adnanh/webhook/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+
+        if [[ -z "$LATEST_VERSION" ]]; then
+            error "无法获取最新版本信息"
+        fi
+
+        info "最新版本: $LATEST_VERSION"
+
+        # 检查是否已安装
+        if command -v webhook &> /dev/null; then
+            CURRENT_VERSION=$(webhook -version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+            info "当前已安装版本: $CURRENT_VERSION"
+
+            if [[ "$CURRENT_VERSION" == "${LATEST_VERSION#v}" ]]; then
+                warn "已是最新版本，是否继续重新安装？[y/N]"
+                read -r CONTINUE
+                if [[ ! "$CONTINUE" =~ ^[Yy]$ ]]; then
+                    info "取消安装"
+                    rm -rf "${TMP_DIR}"
+                    exit 0
+                fi
+            fi
+        fi
+
+        DOWNLOAD_URL="${GITHUB_MIRROR:+${GITHUB_MIRROR}/}https://github.com/adnanh/webhook/releases/download/${LATEST_VERSION}/webhook-linux-${ARCH}.tar.gz"
+
+        info "下载 webhook..."
+        curl -L -o "${TMP_DIR}/webhook.tar.gz" "$DOWNLOAD_URL" || error "下载失败"
+
+        info "解压安装..."
+        tar -xzf "${TMP_DIR}/webhook.tar.gz" -C "${TMP_DIR}"
+        mv "${TMP_DIR}/webhook-linux-${ARCH}/webhook" /usr/local/bin/webhook
+        chmod +x /usr/local/bin/webhook
+    fi
+
     rm -rf "${TMP_DIR}"
-    
+
     info "安装完成: $(webhook -version 2>&1)"
     
     # 创建配置目录
@@ -616,6 +716,9 @@ main() {
     case $ACTION in
         install)
             do_install
+            ;;
+        download)
+            do_download
             ;;
         uninstall)
             do_uninstall
