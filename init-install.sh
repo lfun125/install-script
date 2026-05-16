@@ -265,3 +265,6 @@ main() {
 }
 
 main
+
+
+# bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/init-install.sh)
