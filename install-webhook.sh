@@ -8,11 +8,11 @@ set -e
 #===============================================
 
 # 颜色输出
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+BLUE=$'\033[0;34m'
+NC=$'\033[0m'
 
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -40,6 +40,7 @@ show_help() {
 ${GREEN}Webhook 一键安装/卸载脚本${NC}
 
 用法:
+    $0                    交互式运行（推荐）
     $0 install [选项]    安装 webhook
     $0 download [选项]   在本机下载 webhook tar.gz（国内可配合 --mirror，下载后 scp 到服务器）
     $0 uninstall         卸载 webhook
@@ -49,7 +50,7 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
 安装选项:
     -u, --user USER           运行用户 (默认: apiuser)
     -p, --port PORT           监听端口 (默认: 9000)
-    -t, --token TOKEN         部署密钥 (默认: 自动生成)
+    -t, --token TOKEN         部署密钥 (默认: 随机生成)
     -d, --dir DIR             docker-compose 目录 (默认: /home/USER)
     -s, --services SERVICES   允许的服务名，逗号分隔 (默认: api,web,worker,gateway)
     -m, --mirror URL          GitHub 镜像加速前缀，国内推荐 https://ghfast.top
@@ -61,6 +62,9 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
     -m, --mirror URL          GitHub 镜像加速前缀，国内推荐 https://ghfast.top
 
 示例:
+    # 交互式运行（会逐项询问配置）
+    $0
+
     # 使用默认配置安装
     $0 install
 
@@ -84,6 +88,158 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
     $0 uninstall
 
 EOF
+}
+
+#===============================================
+# 交互式输入
+#===============================================
+read_with_default() {
+    local prompt="$1"
+    local default_value="$2"
+    local target_var="$3"
+    local input
+
+    read -r -p "${prompt} [默认: ${default_value}]: " input
+    printf -v "$target_var" "%s" "${input:-$default_value}"
+}
+
+is_yes() {
+    [[ "$1" =~ ^[Yy]$ ]]
+}
+
+generate_token() {
+    openssl rand -hex 16
+}
+
+normalize_arch() {
+    local arch="$1"
+
+    case "$arch" in
+        amd64|arm64|armhf) printf "%s\n" "$arch" ;;
+        x86_64)  printf "amd64\n" ;;
+        aarch64) printf "arm64\n" ;;
+        armv7l)  printf "armhf\n" ;;
+        *) return 1 ;;
+    esac
+}
+
+detect_arch() {
+    normalize_arch "$(uname -m)"
+}
+
+prompt_action() {
+    while true; do
+        echo ""
+        echo "=============================================="
+        echo "           Webhook 一键安装/卸载脚本"
+        echo "=============================================="
+        echo ""
+        echo "请选择操作："
+        echo "  1) 安装 webhook"
+        echo "  2) 下载 webhook tar.gz"
+        echo "  3) 卸载 webhook"
+        echo "  4) 查看状态"
+        echo "  5) 显示帮助"
+        echo ""
+        read -r -p "请选择操作 [默认: 1]: " action_choice
+        action_choice=${action_choice:-1}
+
+        case "$action_choice" in
+            1|install) ACTION="install"; break ;;
+            2|download) ACTION="download"; break ;;
+            3|uninstall) ACTION="uninstall"; break ;;
+            4|status) ACTION="status"; break ;;
+            5|help) ACTION="help"; break ;;
+            *) warn "无效选择，请重新输入" ;;
+        esac
+    done
+}
+
+prompt_install_config() {
+    local input
+    local use_local
+    local default_compose_dir
+
+    echo ""
+    echo -e "${BLUE}=== 安装参数 ===${NC}"
+
+    read_with_default "运行用户" "$WEBHOOK_USER" WEBHOOK_USER
+    read_with_default "监听端口" "$WEBHOOK_PORT" WEBHOOK_PORT
+
+    default_compose_dir="${COMPOSE_DIR:-/home/${WEBHOOK_USER}}"
+    read_with_default "docker-compose 目录" "$default_compose_dir" COMPOSE_DIR
+
+    read_with_default "允许的服务名（逗号分隔）" "$ALLOWED_SERVICES" ALLOWED_SERVICES
+
+    DEPLOY_TOKEN="${DEPLOY_TOKEN:-$(generate_token)}"
+    read_with_default "部署密钥" "$DEPLOY_TOKEN" DEPLOY_TOKEN
+
+    read -r -p "GitHub 镜像加速前缀 [可空，国内推荐: https://ghfast.top]: " input
+    if [[ -n "$input" ]]; then
+        GITHUB_MIRROR="${input%/}"
+    fi
+
+    read -r -p "是否使用本地 webhook tar.gz 文件安装? (y/n) [默认: n]: " use_local
+    use_local=${use_local:-n}
+    if is_yes "$use_local"; then
+        while [[ -z "$LOCAL_PACKAGE" ]]; do
+            read -r -p "请输入本地 tar.gz 文件路径: " LOCAL_PACKAGE
+            if [[ -z "$LOCAL_PACKAGE" ]]; then
+                warn "文件路径不能为空"
+            fi
+        done
+    fi
+}
+
+prompt_download_config() {
+    local detected_arch
+    local input
+
+    detected_arch="$(detect_arch 2>/dev/null || true)"
+    detected_arch="${detected_arch:-amd64}"
+
+    echo ""
+    echo -e "${BLUE}=== 下载参数 ===${NC}"
+    read_with_default "目标架构 (amd64/arm64/armhf，已根据当前机器自动检测)" "$detected_arch" DOWNLOAD_ARCH
+
+    read_with_default "输出目录" "$OUTPUT_DIR" OUTPUT_DIR
+
+    read -r -p "GitHub 镜像加速前缀 [可空，国内推荐: https://ghfast.top]: " input
+    if [[ -n "$input" ]]; then
+        GITHUB_MIRROR="${input%/}"
+    fi
+}
+
+prompt_uninstall_config() {
+    echo ""
+    echo -e "${BLUE}=== 卸载参数 ===${NC}"
+    read_with_default "运行用户（用于提示配置目录）" "$WEBHOOK_USER" WEBHOOK_USER
+}
+
+run_interactive() {
+    prompt_action
+
+    case "$ACTION" in
+        install)
+            prompt_install_config
+            ;;
+        download)
+            prompt_download_config
+            ;;
+        uninstall)
+            prompt_uninstall_config
+            ;;
+    esac
+}
+
+finalize_install_config() {
+    if [[ -z "$COMPOSE_DIR" ]]; then
+        COMPOSE_DIR="/home/${WEBHOOK_USER}"
+    fi
+
+    if [[ -z "$DEPLOY_TOKEN" ]]; then
+        DEPLOY_TOKEN="$(generate_token)"
+    fi
 }
 
 #===============================================
@@ -141,15 +297,6 @@ parse_args() {
                 ;;
         esac
     done
-
-    # 设置默认值
-    if [[ -z "$COMPOSE_DIR" ]]; then
-        COMPOSE_DIR="/home/${WEBHOOK_USER}"
-    fi
-
-    if [[ -z "$DEPLOY_TOKEN" ]]; then
-        DEPLOY_TOKEN="$(openssl rand -hex 16)"
-    fi
 }
 
 #===============================================
@@ -200,14 +347,8 @@ do_status() {
 # 下载（在本机执行，无需 root）
 #===============================================
 do_download() {
-    local arch="${DOWNLOAD_ARCH:-amd64}"
-    case "$arch" in
-        amd64|arm64|armhf) ;;
-        x86_64)  arch="amd64" ;;
-        aarch64) arch="arm64" ;;
-        armv7l)  arch="armhf" ;;
-        *) error "不支持的架构: $arch (支持: amd64/arm64/armhf)" ;;
-    esac
+    local arch
+    arch="$(normalize_arch "${DOWNLOAD_ARCH:-$(uname -m)}")" || error "不支持的架构: ${DOWNLOAD_ARCH:-$(uname -m)} (支持: amd64/arm64/armhf)"
 
     if [[ ! -d "$OUTPUT_DIR" ]]; then
         error "输出目录不存在: $OUTPUT_DIR"
@@ -300,6 +441,7 @@ do_uninstall() {
 #===============================================
 do_install() {
     check_root
+    finalize_install_config
     
     # 显示配置
     echo ""
@@ -327,13 +469,7 @@ do_install() {
     fi
     
     # 检测架构
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64)  ARCH="amd64" ;;
-        aarch64) ARCH="arm64" ;;
-        armv7l)  ARCH="armhf" ;;
-        *)       error "不支持的架构: $ARCH" ;;
-    esac
+    ARCH="$(detect_arch)" || error "不支持的架构: $(uname -m)"
 
     TMP_DIR=$(mktemp -d)
 
@@ -705,13 +841,12 @@ EOF
 # 主程序
 #===============================================
 main() {
-    # 无参数显示帮助
+    # 无参数进入交互式运行
     if [[ $# -eq 0 ]]; then
-        show_help
-        exit 0
+        run_interactive
+    else
+        parse_args "$@"
     fi
-    
-    parse_args "$@"
     
     case $ACTION in
         install)
