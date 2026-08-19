@@ -180,6 +180,14 @@ setup_vim() {
     
     grep -q "encoding=utf-8" /etc/vim/vimrc 2>/dev/null || echo ":set encoding=utf-8" >> /etc/vim/vimrc
     grep -q "set ts=4 sw=4" /etc/vim/vimrc 2>/dev/null || echo "set ts=4 sw=4" >> /etc/vim/vimrc
+
+    if [ -x /usr/bin/vim.basic ]; then
+        update-alternatives --install /usr/bin/editor editor /usr/bin/vim.basic 100
+        update-alternatives --set editor /usr/bin/vim.basic
+        print_success "服务器默认编辑器已设置为 vim.basic"
+    else
+        print_warning "未找到 /usr/bin/vim.basic，跳过默认编辑器设置"
+    fi
     
     print_success "vim 配置完成"
 }
