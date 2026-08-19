@@ -8,6 +8,12 @@ set -e
 # 是否可以使用 Docker。跳过安装时，后续 Docker 相关配置也会跳过。
 DOCKER_AVAILABLE=false
 
+# 运行用户配置。用户选择跳过创建时，后续用户相关配置也会跳过。
+RUN_USER="apiuser"
+RUN_USER_HOME=""
+RUN_USER_GROUP=""
+RUN_USER_AVAILABLE=false
+
 # 打印函数
 print_info() {
     printf "\033[0;34m[INFO]\033[0m %s\n" "$1"
@@ -178,41 +184,72 @@ setup_vim() {
     print_success "vim 配置完成"
 }
 
-# 6. 添加 apiuser 用户
+# 6. 创建运行用户（可选）
 add_apiuser() {
     echo ""
-    print_info "=== 添加 apiuser 用户 ==="
-    
-    # 修复：使用兼容的重定向语法
-    if id "apiuser" >/dev/null 2>&1; then
-        print_warning "apiuser 用户已存在，跳过创建"
-    else
-        adduser --disabled-password --gecos "" apiuser
-        print_success "apiuser 用户创建成功"
+    print_info "=== 创建运行用户 ==="
+
+    read -p "是否创建运行用户? (y/n) [默认: y]: " create_run_user
+    create_run_user=${create_run_user:-y}
+
+    if [ "$create_run_user" != "y" ] && [ "$create_run_user" != "Y" ]; then
+        print_info "跳过运行用户创建"
+        return 0
     fi
-    
+
+    read -p "请输入运行用户名 [默认: apiuser]: " run_user_input
+    RUN_USER=${run_user_input:-apiuser}
+
+    if [[ ! "$RUN_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+        print_error "用户名格式不正确: $RUN_USER"
+        return 1
+    fi
+
+    if id "$RUN_USER" >/dev/null 2>&1; then
+        print_warning "$RUN_USER 用户已存在，跳过创建"
+    else
+        adduser --disabled-password --gecos "" "$RUN_USER"
+        print_success "$RUN_USER 用户创建成功"
+    fi
+
+    RUN_USER_HOME=$(getent passwd "$RUN_USER" | cut -d: -f6)
+    RUN_USER_GROUP=$(id -gn "$RUN_USER")
+
+    if [ -z "$RUN_USER_HOME" ] || [ "$RUN_USER_HOME" = "/" ]; then
+        print_error "无法确定 $RUN_USER 的安全家目录"
+        return 1
+    fi
+
+    RUN_USER_AVAILABLE=true
+
     if [ "$DOCKER_AVAILABLE" = true ] && getent group docker >/dev/null 2>&1; then
-        gpasswd -a apiuser docker
+        gpasswd -a "$RUN_USER" docker
     else
-        print_info "Docker 未安装，跳过将 apiuser 加入 docker 用户组"
+        print_info "Docker 未安装，跳过将 $RUN_USER 加入 docker 用户组"
     fi
-    
-    mkdir -p /home/apiuser/.ssh
-    touch /home/apiuser/.ssh/authorized_keys
-    
-    chmod 755 /home/apiuser/
-    chmod 700 /home/apiuser/.ssh
-    chmod 600 /home/apiuser/.ssh/authorized_keys
-    chown apiuser:apiuser -R /home/apiuser/
-    
-    print_success "apiuser 用户配置完成"
+
+    mkdir -p "$RUN_USER_HOME/.ssh"
+    touch "$RUN_USER_HOME/.ssh/authorized_keys"
+
+    chmod 755 "$RUN_USER_HOME"
+    chmod 700 "$RUN_USER_HOME/.ssh"
+    chmod 600 "$RUN_USER_HOME/.ssh/authorized_keys"
+    chown "$RUN_USER:$RUN_USER_GROUP" -R "$RUN_USER_HOME"
+
+    print_success "$RUN_USER 用户配置完成"
 }
 
 # 7. 设置 SSH 公钥
 setup_ssh_key() {
     echo ""
     print_info "=== 设置 SSH 公钥 ==="
-    read -p "是否为 apiuser 设置 SSH 公钥? (y/n) [默认: n]: " set_key
+
+    if [ "$RUN_USER_AVAILABLE" != true ]; then
+        print_info "未创建运行用户，跳过 SSH 公钥设置"
+        return 0
+    fi
+
+    read -p "是否为 $RUN_USER 设置 SSH 公钥? (y/n) [默认: n]: " set_key
     set_key=${set_key:-n}
     
     if [ "$set_key" = "y" ] || [ "$set_key" = "Y" ]; then
@@ -220,8 +257,8 @@ setup_ssh_key() {
         read -r pubkey
         
         if [ -n "$pubkey" ]; then
-            echo "$pubkey" >> /home/apiuser/.ssh/authorized_keys
-            chown apiuser:apiuser /home/apiuser/.ssh/authorized_keys
+            echo "$pubkey" >> "$RUN_USER_HOME/.ssh/authorized_keys"
+            chown "$RUN_USER:$RUN_USER_GROUP" "$RUN_USER_HOME/.ssh/authorized_keys"
             print_success "SSH 公钥已添加"
         else
             print_warning "公钥内容为空，跳过设置"
