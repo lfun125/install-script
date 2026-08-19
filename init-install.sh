@@ -5,6 +5,9 @@
 
 set -e
 
+# 是否可以使用 Docker。跳过安装时，后续 Docker 相关配置也会跳过。
+DOCKER_AVAILABLE=false
+
 # 打印函数
 print_info() {
     printf "\033[0;34m[INFO]\033[0m %s\n" "$1"
@@ -106,31 +109,55 @@ run_apt_update() {
     print_success "apt update 完成"
 }
 
-# 4. 安装 Docker
+# 4. 安装 Docker（可选）
 install_docker() {
     echo ""
     print_info "=== 安装 Docker ==="
-    read -p "是否为国内机器? (y/n) [默认: y]: " is_china
-    is_china=${is_china:-y}
 
-    if [ "$is_china" = "y" ] || [ "$is_china" = "Y" ]; then
-        print_info "使用阿里云源安装 Docker..."
-        
-        apt install -y gpg curl lsb-release ca-certificates
-        mkdir -p /etc/apt/keyrings
-        curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://mirrors.aliyun.com/docker-ce/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list
-        apt update
-        apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-    else
-        print_info "使用官方源安装 Docker..."
-        curl -sSL https://get.docker.com/ | sh
+    read -p "是否安装 Docker? (y/n) [默认: y]: " install_docker_choice
+    install_docker_choice=${install_docker_choice:-y}
+
+    if [ "$install_docker_choice" != "y" ] && [ "$install_docker_choice" != "Y" ]; then
+        if command -v docker >/dev/null 2>&1; then
+            DOCKER_AVAILABLE=true
+            print_info "跳过 Docker 安装，继续使用系统中已有的 Docker"
+        else
+            print_warning "已跳过 Docker 安装"
+        fi
+        return 0
     fi
 
+    if command -v docker >/dev/null 2>&1; then
+        print_info "检测到 Docker 已安装，跳过重复安装"
+    else
+        read -p "是否为国内机器? (y/n) [默认: y]: " is_china
+        is_china=${is_china:-y}
+
+        if [ "$is_china" = "y" ] || [ "$is_china" = "Y" ]; then
+            print_info "使用阿里云源安装 Docker..."
+
+            apt install -y gpg curl lsb-release ca-certificates
+            mkdir -p /etc/apt/keyrings
+            curl -fsSL https://mirrors.aliyun.com/docker-ce/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+            echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://mirrors.aliyun.com/docker-ce/linux/debian $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list
+            apt update
+            apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        else
+            print_info "使用官方源安装 Docker..."
+            curl -sSL https://get.docker.com/ | sh
+        fi
+    fi
+
+    if ! command -v docker >/dev/null 2>&1; then
+        print_error "Docker 安装失败，未找到 docker 命令"
+        return 1
+    fi
+
+    DOCKER_AVAILABLE=true
     systemctl enable docker
     systemctl start docker
     
-    print_success "Docker 安装完成"
+    print_success "Docker 已准备完成"
     docker --version
 }
 
@@ -164,7 +191,11 @@ add_apiuser() {
         print_success "apiuser 用户创建成功"
     fi
     
-    gpasswd -a apiuser docker
+    if [ "$DOCKER_AVAILABLE" = true ] && getent group docker >/dev/null 2>&1; then
+        gpasswd -a apiuser docker
+    else
+        print_info "Docker 未安装，跳过将 apiuser 加入 docker 用户组"
+    fi
     
     mkdir -p /home/apiuser/.ssh
     touch /home/apiuser/.ssh/authorized_keys
@@ -204,6 +235,12 @@ setup_ssh_key() {
 setup_docker_registry() {
     echo ""
     print_info "=== 配置 Docker 私有仓库 ==="
+
+    if [ "$DOCKER_AVAILABLE" != true ]; then
+        print_info "Docker 未安装，跳过私有仓库配置"
+        return 0
+    fi
+
     read -p "是否添加支持 HTTP 的私有仓库? (y/n) [默认: n]: " add_registry
     add_registry=${add_registry:-n}
     
