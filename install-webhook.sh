@@ -563,8 +563,8 @@ do_install() {
         "type": "value",
         "value": "${DEPLOY_TOKEN}",
         "parameter": {
-          "source": "url",
-          "name": "token"
+          "source": "header",
+          "name": "Authorization"
         }
       }
     }
@@ -580,8 +580,8 @@ do_install() {
         "type": "value",
         "value": "${DEPLOY_TOKEN}",
         "parameter": {
-          "source": "url",
-          "name": "token"
+          "source": "header",
+          "name": "Authorization"
         }
       }
     }
@@ -817,10 +817,10 @@ EOF
     echo ""
     echo "调用示例:"
     echo "  # 部署单个服务"
-    echo "  curl \"http://YOUR_SERVER_IP:${WEBHOOK_PORT}/hooks/deploy?token=${DEPLOY_TOKEN}&service=api\""
+    echo "  curl --header \"Authorization: ${DEPLOY_TOKEN}\" \"http://YOUR_SERVER_IP:${WEBHOOK_PORT}/hooks/deploy?service=api\""
     echo ""
     echo "  # 部署所有服务"
-    echo "  curl \"http://YOUR_SERVER_IP:${WEBHOOK_PORT}/hooks/deploy-all?token=${DEPLOY_TOKEN}\""
+    echo "  curl --header \"Authorization: ${DEPLOY_TOKEN}\" \"http://YOUR_SERVER_IP:${WEBHOOK_PORT}/hooks/deploy-all\""
     echo ""
     echo "返回示例:"
     echo "  SUCCESS: api 部署成功"
