@@ -181,6 +181,29 @@ echo
 c_bld "--- 会话策略 ---"
 read -rp "用户证书默认有效期 [8h]: " SESSION_TTL; SESSION_TTL="${SESSION_TTL:-8h}"
 
+echo
+c_bld "--- 版本 ---"
+LATEST=""
+if command -v teleport >/dev/null; then
+    LATEST="$(teleport version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)"
+    [[ -n "$LATEST" ]] && echo "当前已安装: ${LATEST}"
+fi
+if [[ -z "$LATEST" ]]; then
+    echo -n "正在查询最新版本… "
+    LATEST="$(curl -fsSL --max-time 10 \
+        https://api.github.com/repos/gravitational/teleport/releases/latest 2>/dev/null \
+        | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9.]+"' \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    if [[ -n "$LATEST" ]]; then echo "${LATEST}"; else echo "查询失败"; fi
+fi
+if [[ -n "$LATEST" ]]; then
+    read -rp "安装版本 [${LATEST}]: " VERSION; VERSION="${VERSION:-$LATEST}"
+else
+    echo "请手动指定，可在 https://goteleport.com/download/ 查看"
+    read -rp "安装版本 (如 18.11.0): " VERSION
+fi
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "版本号格式应为 x.y.z，例如 18.10.0"
+
 # ============================================================ 确认
 
 echo
@@ -194,6 +217,7 @@ printf '  隧道端口     : %s  → 公网开放\n' "$TUN_PORT"
 printf '  Auth 端口    : 3025 → 仅本机\n'
 printf '  证书方式     : %s\n' "$CERT_MODE"
 printf '  证书有效期   : %s\n' "$SESSION_TTL"
+printf '  Teleport 版本: %s\n' "$VERSION"
 echo
 read -rp "开始安装？[y/N] " go
 [[ "${go,,}" == "y" ]] || { echo "已取消"; exit 0; }
@@ -204,8 +228,8 @@ echo
 if command -v teleport >/dev/null; then
     c_grn "[1/5] Teleport 已安装: $(teleport version | head -1)"
 else
-    c_bld "[1/5] 安装 Teleport…"
-    curl -fsSL https://cdn.teleport.dev/install.sh | bash -s
+    c_bld "[1/5] 安装 Teleport ${VERSION}…"
+    curl -fsSL https://cdn.teleport.dev/install.sh | bash -s "$VERSION"
     command -v teleport >/dev/null || die "安装失败"
     c_grn "      $(teleport version | head -1)"
 fi
@@ -383,7 +407,8 @@ $(c_bld "3. 加资源节点")
 
    tctl tokens add --type=node --ttl=1h
 
-   节点端 proxy_server 填 ${DOMAIN}:${TUN_PORT}（不是 ${WEB_PORT}）。
+   节点端 proxy_server 填 ${DOMAIN}:${TUN_PORT}（不是 ${WEB_PORT}），
+   Teleport 版本装 ${VERSION}（agent 版本不得高于服务端）。
    加完务必在节点上执行 ss -tnp | grep teleport 确认没有到 :${WEB_PORT} 的连接——
    否则该节点在 ${WEB_PORT} 收紧后，下次重启将永久掉线。
 
