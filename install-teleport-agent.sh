@@ -3,6 +3,14 @@
 # Teleport Agent 交互式安装脚本
 #
 #   sudo bash install-teleport-agent.sh
+#   sudo env DEFAULT_PROXY="teleport.example.com:3024" DEFAULT_TOKEN="your-token" bash install-teleport-agent.sh
+#
+# 从 GitHub 执行（在 root 用户的 Bash 中运行）：
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-teleport-agent.sh)
+#
+# 从 GitHub 执行并设置默认值（Proxy 和令牌提示处回车使用，也可输入新值覆盖）：
+#   DEFAULT_PROXY='teleport.example.com:3024' DEFAULT_TOKEN='your-token' \
+#     bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-teleport-agent.sh)
 #
 # 会依次询问 proxy_server / token / labels / nodename / 版本，
 # 然后安装 Teleport、写配置、加入集群并验证。
@@ -10,7 +18,8 @@
 
 set -euo pipefail
 
-DEFAULT_PROXY="teleport.example.com:3024"
+DEFAULT_PROXY="${DEFAULT_PROXY:-teleport.example.com:3024}"
+DEFAULT_TOKEN="${DEFAULT_TOKEN:-}"
 CONFIG="/etc/teleport.yaml"
 DATA_DIR="/var/lib/teleport"
 TOKEN_FILE="${DATA_DIR}/tokenjoin"
@@ -58,7 +67,12 @@ read -rp "Proxy 地址 [${DEFAULT_PROXY}]: " PROXY_SERVER
 PROXY_SERVER="${PROXY_SERVER:-$DEFAULT_PROXY}"
 [[ "$PROXY_SERVER" == *:* ]] || die "Proxy 地址必须包含端口，例如 ${DEFAULT_PROXY}"
 
-read -rp "加入令牌 (tctl tokens add --type=node --ttl=1h): " TOKEN
+if [[ -n "$DEFAULT_TOKEN" ]]; then
+    read -rp "加入令牌 (已设置默认值，回车使用): " TOKEN
+else
+    read -rp "加入令牌 (tctl tokens add --type=node --ttl=1h): " TOKEN
+fi
+TOKEN="${TOKEN:-$DEFAULT_TOKEN}"
 [[ -n "$TOKEN" ]] || die "令牌不能为空"
 
 echo
@@ -224,5 +238,3 @@ echo "常用命令："
 echo "    journalctl -u teleport -f      # 看日志"
 echo "    systemctl restart teleport     # 重启"
 echo "    ss -tnp | grep teleport        # 看连接端口"
-
-# bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-teleport-agent.sh)
