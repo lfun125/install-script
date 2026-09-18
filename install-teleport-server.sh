@@ -251,7 +251,7 @@ if [[ "$CERT_MODE" == "1" ]]; then
         certbot certonly \
             --dns-cloudflare \
             --dns-cloudflare-credentials /root/.secrets/cloudflare.ini \
-            -d "$DOMAIN" -d "*.${DOMAIN}" -d "*.teleport.${DOMAIN}" \
+            -d "$DOMAIN" -d "*.${DOMAIN}" \
             --email "$ACME_EMAIL" --agree-tos --non-interactive
 
         [[ -f "$CERT_FILE" ]] || die "证书申请失败"
