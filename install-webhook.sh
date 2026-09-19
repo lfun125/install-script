@@ -24,6 +24,8 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 WEBHOOK_USER="apiuser"
 WEBHOOK_PORT="9000"
 DEPLOY_TOKEN=""
+TOKEN_SOURCE=""
+TOKEN_NAME=""
 COMPOSE_DIR=""
 ALLOWED_SERVICES="api,web,worker,gateway"
 GITHUB_MIRROR=""
@@ -51,6 +53,7 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
     -u, --user USER           运行用户 (默认: apiuser)
     -p, --port PORT           监听端口 (默认: 9000)
     -t, --token TOKEN         部署密钥 (默认: 随机生成)
+        --token-source SOURCE 密钥传递位置: header / url (终端安装时询问，默认: header)
     -d, --dir DIR             docker-compose 目录 (默认: /home/USER)
     -s, --services SERVICES   允许的服务名，逗号分隔 (默认: api,web,worker,gateway)
     -m, --mirror URL          GitHub 镜像加速前缀，国内推荐 https://ghfast.top
@@ -70,6 +73,9 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
 
     # 自定义配置安装
     $0 install -u deploy -p 8080 -s "api,web,im-server"
+
+    # 通过 URL 参数 token 传递部署密钥
+    $0 install --token-source url --token mytoken123
 
     # 国内使用镜像加速安装
     $0 install --mirror https://ghfast.top
@@ -109,6 +115,23 @@ is_yes() {
 
 generate_token() {
     openssl rand -hex 16
+}
+
+prompt_token_source() {
+    local choice
+
+    echo ""
+    echo "请选择部署密钥传递位置："
+    echo "  1) Header: Authorization: DEPLOY_TOKEN"
+    echo "  2) URL: token=DEPLOY_TOKEN"
+    while true; do
+        read -r -p "请选择 [默认: 1]: " choice || error "无法读取密钥传递位置，请使用 --token-source header 或 url"
+        case "${choice:-1}" in
+            1|header) TOKEN_SOURCE="header"; break ;;
+            2|url) TOKEN_SOURCE="url"; break ;;
+            *) warn "无效选择，请输入 1 (header) 或 2 (url)" ;;
+        esac
+    done
 }
 
 normalize_arch() {
@@ -173,6 +196,7 @@ prompt_install_config() {
 
     DEPLOY_TOKEN="${DEPLOY_TOKEN:-$(generate_token)}"
     read_with_default "部署密钥" "$DEPLOY_TOKEN" DEPLOY_TOKEN
+    prompt_token_source
 
     read -r -p "GitHub 镜像加速前缀 [可空，国内推荐: https://ghfast.top]: " input
     if [[ -n "$input" ]]; then
@@ -233,6 +257,20 @@ run_interactive() {
 }
 
 finalize_install_config() {
+    if [[ -z "$TOKEN_SOURCE" ]]; then
+        if [[ -t 0 ]]; then
+            prompt_token_source
+        else
+            TOKEN_SOURCE="header"
+        fi
+    fi
+
+    case "$TOKEN_SOURCE" in
+        header) TOKEN_NAME="Authorization" ;;
+        url) TOKEN_NAME="token" ;;
+        *) error "无效的密钥传递位置: $TOKEN_SOURCE (支持: header/url)" ;;
+    esac
+
     if [[ -z "$COMPOSE_DIR" ]]; then
         COMPOSE_DIR="/home/${WEBHOOK_USER}"
     fi
@@ -270,6 +308,11 @@ parse_args() {
                 ;;
             -t|--token)
                 DEPLOY_TOKEN="$2"
+                shift 2
+                ;;
+            --token-source)
+                [[ $# -ge 2 && -n "$2" ]] || error "--token-source 需要指定 header 或 url"
+                TOKEN_SOURCE="$2"
                 shift 2
                 ;;
             -d|--dir)
@@ -450,6 +493,7 @@ do_install() {
     echo "  端口: ${WEBHOOK_PORT}"
     echo "  Compose目录: ${COMPOSE_DIR}"
     echo "  允许的服务: ${ALLOWED_SERVICES}"
+    echo "  密钥传递位置: ${TOKEN_SOURCE} (${TOKEN_NAME})"
     echo ""
     
     # 检查用户是否存在
@@ -563,8 +607,8 @@ do_install() {
         "type": "value",
         "value": "${DEPLOY_TOKEN}",
         "parameter": {
-          "source": "header",
-          "name": "Authorization"
+          "source": "${TOKEN_SOURCE}",
+          "name": "${TOKEN_NAME}"
         }
       }
     }
@@ -580,8 +624,8 @@ do_install() {
         "type": "value",
         "value": "${DEPLOY_TOKEN}",
         "parameter": {
-          "source": "header",
-          "name": "Authorization"
+          "source": "${TOKEN_SOURCE}",
+          "name": "${TOKEN_NAME}"
         }
       }
     }
@@ -811,16 +855,25 @@ EOF
     echo "  - 用户: ${WEBHOOK_USER}"
     echo "  - 配置目录: ${WEBHOOK_DIR}"
     echo "  - Compose目录: ${COMPOSE_DIR}"
+    echo "  - 密钥传递位置: ${TOKEN_SOURCE} (${TOKEN_NAME})"
     echo ""
     echo -e "${YELLOW}部署密钥 (请妥善保存):${NC}"
     echo "  ${DEPLOY_TOKEN}"
     echo ""
     echo "调用示例:"
     echo "  # 部署单个服务"
-    echo "  curl --header \"Authorization: ${DEPLOY_TOKEN}\" \"http://YOUR_SERVER_IP:${WEBHOOK_PORT}/hooks/deploy?service=api\""
+    if [[ "$TOKEN_SOURCE" == "url" ]]; then
+        echo "  curl --get --data-urlencode \"token=${DEPLOY_TOKEN}\" \"http://YOUR_SERVER_IP:${WEBHOOK_PORT}/hooks/deploy?service=api\""
+    else
+        echo "  curl --header \"Authorization: ${DEPLOY_TOKEN}\" \"http://YOUR_SERVER_IP:${WEBHOOK_PORT}/hooks/deploy?service=api\""
+    fi
     echo ""
     echo "  # 部署所有服务"
-    echo "  curl --header \"Authorization: ${DEPLOY_TOKEN}\" \"http://YOUR_SERVER_IP:${WEBHOOK_PORT}/hooks/deploy-all\""
+    if [[ "$TOKEN_SOURCE" == "url" ]]; then
+        echo "  curl --get --data-urlencode \"token=${DEPLOY_TOKEN}\" \"http://YOUR_SERVER_IP:${WEBHOOK_PORT}/hooks/deploy-all\""
+    else
+        echo "  curl --header \"Authorization: ${DEPLOY_TOKEN}\" \"http://YOUR_SERVER_IP:${WEBHOOK_PORT}/hooks/deploy-all\""
+    fi
     echo ""
     echo "返回示例:"
     echo "  SUCCESS: api 部署成功"
