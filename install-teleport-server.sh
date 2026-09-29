@@ -5,8 +5,13 @@
 #
 #      sudo bash install-teleport-server.sh
 #
-#  采用 separate 监听模式：客户端流量与 agent 隧道流量走不同端口，
-#  便于对「人」做 IP 白名单、同时放行动态 IP 的资源节点。
+#  安装时可选两种监听模式：
+#    separate  : 客户端流量与 agent 隧道流量走不同端口（443/3023/3024），
+#                便于对「人」做 IP 白名单、同时放行动态 IP 的资源节点。
+#    multiplex : Teleport 默认方式，所有流量经 TLS 多路复用走同一个端口（443），
+#                部署简单，但该端口需对公网开放（agent 也走它），无法按人做白名单。
+#
+#  下方端口说明针对 separate 模式；multiplex 模式只需对外开放 443 与 22。
 # ==============================================================================
 #
 # ------------------------------------------------------------------------------
@@ -124,9 +129,25 @@ RP_ID="${RP_ID:-$DOMAIN}"
 
 echo
 c_bld "--- 端口 ---"
-read -rp "Web / 登录端口 [443]: "       WEB_PORT;    WEB_PORT="${WEB_PORT:-443}"
-read -rp "tsh SSH 会话端口 [3023]: "    SSH_PORT;    SSH_PORT="${SSH_PORT:-3023}"
-read -rp "agent 隧道端口 [3024]: "      TUN_PORT;    TUN_PORT="${TUN_PORT:-3024}"
+echo "  1) separate  分端口：Web/登录、tsh SSH、agent 隧道各用一个端口"
+echo "               （可对开发者做 IP 白名单，同时对公网放行 agent 隧道）"
+echo "  2) multiplex 单端口：全部流量走同一个端口（Teleport 默认配置）"
+echo "               （简单，但该端口需对公网开放，无法按人做白名单）"
+read -rp "选择 [1]: " LISTEN_MODE; LISTEN_MODE="${LISTEN_MODE:-1}"
+case "$LISTEN_MODE" in
+    1) LISTEN_MODE="separate" ;;
+    2) LISTEN_MODE="multiplex" ;;
+    *) die "无效选择" ;;
+esac
+
+if [[ "$LISTEN_MODE" == "separate" ]]; then
+    read -rp "Web / 登录端口 [443]: "       WEB_PORT;    WEB_PORT="${WEB_PORT:-443}"
+    read -rp "tsh SSH 会话端口 [3023]: "    SSH_PORT;    SSH_PORT="${SSH_PORT:-3023}"
+    read -rp "agent 隧道端口 [3024]: "      TUN_PORT;    TUN_PORT="${TUN_PORT:-3024}"
+else
+    read -rp "统一端口 [443]: "             WEB_PORT;    WEB_PORT="${WEB_PORT:-443}"
+    SSH_PORT="$WEB_PORT"; TUN_PORT="$WEB_PORT"
+fi
 
 echo
 c_bld "--- 证书 ---"
@@ -155,7 +176,8 @@ case "$CERT_MODE" in
     3)
         read -rp "Let's Encrypt 邮箱: " ACME_EMAIL
         [[ -n "$ACME_EMAIL" ]] || die "邮箱不能为空"
-        c_ylw "内置 ACME 需要 ${WEB_PORT} 对公网开放，无法与 IP 白名单共存"
+        [[ "$LISTEN_MODE" == "separate" ]] \
+            && c_ylw "内置 ACME 需要 ${WEB_PORT} 对公网开放，无法与 IP 白名单共存"
         ;;
     *) die "无效选择" ;;
 esac
@@ -211,9 +233,14 @@ c_bld "--- 请确认 ---"
 printf '  域名         : %s\n' "$DOMAIN"
 printf '  集群名       : %s  (不可更改)\n' "$CLUSTER_NAME"
 printf '  rp_id        : %s  (不可更改)\n' "$RP_ID"
-printf '  Web 端口     : %s  → 开发者白名单\n' "$WEB_PORT"
-printf '  tsh 端口     : %s  → 开发者白名单\n' "$SSH_PORT"
-printf '  隧道端口     : %s  → 公网开放\n' "$TUN_PORT"
+printf '  监听模式     : %s\n' "$LISTEN_MODE"
+if [[ "$LISTEN_MODE" == "separate" ]]; then
+    printf '  Web 端口     : %s  → 开发者白名单\n' "$WEB_PORT"
+    printf '  tsh 端口     : %s  → 开发者白名单\n' "$SSH_PORT"
+    printf '  隧道端口     : %s  → 公网开放\n' "$TUN_PORT"
+else
+    printf '  统一端口     : %s  → 公网开放（Web / tsh / agent 隧道共用）\n' "$WEB_PORT"
+fi
 printf '  Auth 端口    : 3025 → 仅本机\n'
 printf '  证书方式     : %s\n' "$CERT_MODE"
 printf '  证书有效期   : %s\n' "$SESSION_TTL"
@@ -284,8 +311,21 @@ auth_service:
   # 仅本机可达：Proxy 与 Auth 同进程，远程 agent 的 auth 流量经 Proxy 转发
   listen_addr: 127.0.0.1:3025
   cluster_name: ${CLUSTER_NAME}
+EOF
+
+if [[ "$LISTEN_MODE" == "separate" ]]; then
+cat <<EOF
   # separate: 关闭 TLS 多路复用，是端口分离的前提
   proxy_listener_mode: separate
+EOF
+else
+cat <<EOF
+  # multiplex: TLS 多路复用，Web / tsh / agent 隧道共用 ${WEB_PORT}（Teleport 默认）
+  proxy_listener_mode: multiplex
+EOF
+fi
+
+cat <<EOF
   # off: 禁止 PROXY 协议头，防止源 IP 伪造（无四层负载均衡时必须关闭）
   proxy_protocol: off
   disconnect_expired_cert: true
@@ -305,6 +345,10 @@ proxy_service:
   enabled: true
   proxy_protocol: off
 
+EOF
+
+if [[ "$LISTEN_MODE" == "separate" ]]; then
+cat <<EOF
   # ${WEB_PORT}: Web UI / tsh login   → 防火墙仅放行开发者白名单 IP
   web_listen_addr: 0.0.0.0:${WEB_PORT}
   # ${SSH_PORT}: tsh SSH 会话         → 防火墙仅放行开发者白名单 IP
@@ -318,6 +362,13 @@ proxy_service:
   # 告知 agent 隧道入口，使其全程不经 ${WEB_PORT}
   tunnel_public_addr: ${DOMAIN}:${TUN_PORT}
 EOF
+else
+cat <<EOF
+  # ${WEB_PORT}: Web UI / tsh login / tsh SSH / agent 隧道全部复用 → 防火墙对公网开放
+  web_listen_addr: 0.0.0.0:${WEB_PORT}
+  public_addr: ${DOMAIN}:${WEB_PORT}
+EOF
+fi
 
 if [[ "$CERT_MODE" == "3" ]]; then
 cat <<EOF
@@ -378,6 +429,49 @@ ss -tlnp 2>/dev/null | grep -E ":${WEB_PORT}|:${SSH_PORT}|:${TUN_PORT}|:3025" \
 
 # ============================================================ 收尾
 
+if [[ "$LISTEN_MODE" == "multiplex" ]]; then
+cat <<EOF
+
+$(c_bld "=== 安装完成 ===")
+
+$(c_bld "1. 创建管理员")
+
+   tctl users add admin --roles=editor,access --logins=root,ubuntu
+
+$(c_bld "2. 防火墙（本脚本不配置，请自行处理）")
+
+   端口          开放给              说明
+   ----------    ----------------    --------------------------------
+   22/tcp        管理员 IP           先放行，否则会锁死自己
+   ${WEB_PORT}/tcp       公网                Web / tsh / agent 隧道全部复用
+   3025/tcp      不开放              已绑 127.0.0.1
+   3022/tcp      不开放              本机节点，经 Proxy 转发
+
+   multiplex 模式下 agent 也走 ${WEB_PORT}，因此无法对该端口做开发者 IP 白名单；
+   如需白名单，请重新运行脚本选择 separate 模式。
+
+$(c_bld "3. 加资源节点")
+
+   tctl tokens add --type=node --ttl=1h
+
+   节点端 proxy_server 填 ${DOMAIN}:${WEB_PORT}，
+   Teleport 版本装 ${VERSION}（agent 版本不得高于服务端）。
+
+$(c_bld "4. 客户端")
+
+   tsh login --proxy=${DOMAIN}:${WEB_PORT} --user=<用户名>
+
+   验收请做到 tsh ssh，确认会话能建立。
+
+$(c_bld "5. 升级纪律")
+
+   ${WEB_PORT} 对公网开放，安全性依赖版本跟进：
+   - 订阅 gravitational/teleport 的 Release 通知
+   - 补丁版本（x.y.z）不涉及数据迁移，出了就升
+   - 大版本不能跨级跳，须逐个大版本升级
+
+EOF
+else
 cat <<EOF
 
 $(c_bld "=== 安装完成 ===")
@@ -426,6 +520,7 @@ $(c_bld "5. 升级纪律")
    - 大版本不能跨级跳，须逐个大版本升级
 
 EOF
+fi
 
 if [[ "$CERT_MODE" == "1" ]]; then
     c_ylw "证书续期自检： certbot renew --dry-run"
