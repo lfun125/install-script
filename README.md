@@ -158,3 +158,50 @@ sudo ./install-webhook.sh install --mirror https://ghfast.top
 | gh-proxy | `https://gh-proxy.com` |
 
 > 镜像站可用性可能随时变化，如遇下载失败请尝试更换。
+
+---
+
+# APT 源添加脚本（nginx / MySQL / MongoDB）
+
+`add-apt-sources.sh` 根据当前系统（Ubuntu / Debian 及其衍生版）自动识别发行代号和架构，添加以下官方 APT 源：
+
+| 源 | 地址 | 可安装的包 |
+|----|------|-----------|
+| nginx | nginx.org（默认 stable） | `nginx` |
+| MySQL | repo.mysql.com（`mysql-8.4-lts` + `mysql-tools`） | `mysql-server`、`mysql-client`、`mysql-shell` |
+| MongoDB | repo.mongodb.org（默认 8.0） | `mongodb-org`（服务端）、`mongodb-mongosh`（命令行）、`mongodb-database-tools`（mongodump / mongorestore / mongoimport / mongoexport） |
+
+## 用法
+
+```bash
+sudo bash add-apt-sources.sh              # 交互选择要添加的源
+sudo bash add-apt-sources.sh nginx mysql  # 只添加指定的源
+sudo bash add-apt-sources.sh all          # 全部添加
+
+# 从 GitHub 执行
+bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/add-apt-sources.sh) all
+```
+
+添加完成后会执行 `apt-get update`，列出安装命令参考，并询问是否直接安装。
+
+## 可选环境变量
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `NGINX_BRANCH` | nginx 分支：`stable` / `mainline` | `stable` |
+| `MYSQL_SERIES` | MySQL 系列：`8.0` / `8.4-lts` / `9.7-lts` / `innovation` | `8.4-lts` |
+| `MONGODB_VERSION` | MongoDB 大版本，如 `7.0` / `8.0` | `8.0` |
+| `INSTALL` | 设为 `y` 时添加源后直接安装，不再询问 | 空（询问） |
+
+```bash
+sudo NGINX_BRANCH=mainline MYSQL_SERIES=9.7-lts INSTALL=y bash add-apt-sources.sh all
+```
+
+## 说明
+
+- 公钥存放在 `/usr/share/keyrings/`，通过 `signed-by` 绑定到对应源，不使用已废弃的 `apt-key`。
+- 源文件写入 `/etc/apt/sources.list.d/`：`nginx.list`、`mysql.list`、`mongodb-org-<版本>.list`。
+- nginx 额外写入 `/etc/apt/preferences.d/99nginx`（Pin-Priority 900），确保优先使用 nginx.org 的包而非系统自带版本。
+- 官方源尚未支持当前发行代号时（如新发布的系统），自动回退到该发行版已支持的最近代号并提示。
+- MongoDB 官方源仅提供 amd64 / arm64。
+- MySQL 公钥使用 `RPM-GPG-KEY-mysql-2025`（有效期至 2027-10）。网上常见的 `RPM-GPG-KEY-mysql-2023` 已于 2025-10 过期，会导致 `apt-get update` 签名校验失败。
