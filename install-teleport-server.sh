@@ -12,6 +12,16 @@
 #                部署简单，但该端口需对公网开放（agent 也走它），无法按人做白名单。
 #
 #  下方端口说明针对 separate 模式；multiplex 模式只需对外开放 443 与 22。
+#
+#  可选：由 nginx 接管 443（与本机其他 HTTPS 网站共用 443）
+#    nginx stream 在四层按 SNI 分流，不解密 TLS：
+#      <域名> / *.<域名> / *.teleport.cluster.local → Teleport 127.0.0.1:3080
+#      其他域名                                     → nginx 自身 HTTPS 站点 127.0.0.1:8443
+#    separate 模式下 3023/3024 也由 nginx 转发到 127.0.0.1:13023/13024。
+#    nginx 以 PROXY 协议把真实客户端 IP 传给 Teleport（proxy_protocol: on），
+#    Teleport 只监听 127.0.0.1，外部无法直连伪造 PROXY 头。
+#    443 需对公网开放（其他网站要用），开发者白名单改由 nginx 按域名执行，
+#    名单文件 /etc/nginx/teleport-allow.conf，改完 nginx -s reload 生效。
 # ==============================================================================
 #
 # ------------------------------------------------------------------------------
@@ -65,6 +75,17 @@ set -euo pipefail
 
 CONFIG="/etc/teleport.yaml"
 DATA_DIR="/var/lib/teleport"
+
+# nginx 接管模式下的内部地址
+NGX_STREAM_DIR="/etc/nginx/stream.d"
+NGX_STREAM_CONF="${NGX_STREAM_DIR}/teleport.conf"
+NGX_ALLOW_FILE="/etc/nginx/teleport-allow.conf"
+NGX_REALIP_CONF="/etc/nginx/conf.d/00-teleport-stream-realip.conf"
+INNER_WEB="127.0.0.1:3080"
+INNER_SSH="127.0.0.1:13023"
+INNER_TUN="127.0.0.1:13024"
+INNER_HTTPS="127.0.0.1:8443"     # nginx 自身 HTTPS 站点改监听到这里
+INNER_DENY="127.0.0.1:10999"     # 白名单外的连接转到这里直接断开
 
 c_red() { printf '\033[31m%s\033[0m\n' "$*"; }
 c_grn() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -147,6 +168,62 @@ if [[ "$LISTEN_MODE" == "separate" ]]; then
 else
     read -rp "统一端口 [443]: "             WEB_PORT;    WEB_PORT="${WEB_PORT:-443}"
     SSH_PORT="$WEB_PORT"; TUN_PORT="$WEB_PORT"
+fi
+
+echo
+c_bld "--- nginx 前置 ---"
+echo "由 nginx 接管 ${WEB_PORT} 端口，按 SNI 把 Teleport 域名转给 Teleport，"
+echo "其他域名交给 nginx 自身的 HTTPS 站点（适合本机还跑着其他网站）。"
+read -rp "使用 nginx 接管 ${WEB_PORT}？[y/N] " USE_NGINX
+USE_NGINX="${USE_NGINX,,}"; [[ "$USE_NGINX" == "y" ]] || USE_NGINX="n"
+
+ALLOW_RAW=""; REWRITE_HTTPS="n"; NGX_HTTPS_FILES=()
+if [[ "$USE_NGINX" == "y" ]]; then
+    if [[ "$LISTEN_MODE" == "separate" ]]; then
+        echo
+        echo "${WEB_PORT} 要给其他网站用，只能对公网开放，开发者白名单改由 nginx 执行"
+        echo "（只拦 Teleport 域名与 ${SSH_PORT} 端口，不影响其他网站）。"
+        echo "格式: IP 或 CIDR，多个用英文逗号分隔，例如 1.2.3.4,10.0.0.0/8"
+        read -rp "开发者白名单 (留空不限制): " ALLOW_RAW
+        IFS=',' read -ra ARR <<< "$ALLOW_RAW"
+        for ip in "${ARR[@]}"; do
+            ip="$(echo "$ip" | xargs)"; [[ -z "$ip" ]] && continue
+            [[ "$ip" =~ ^[0-9a-fA-F:.]+(/[0-9]+)?$ ]] || die "白名单格式错误: '${ip}'"
+        done
+    fi
+
+    # 端口被非 nginx / teleport 的进程占用则无法接管
+    for p in "$WEB_PORT" "$SSH_PORT" "$TUN_PORT"; do
+        holder="$(ss -tlnpH "sport = :${p}" 2>/dev/null | grep -oE '"[^"]+"' | tr -d '"' | sort -u \
+            | grep -vE '^(nginx|teleport)$' || true)"
+        [[ -z "$holder" ]] || die "端口 ${p} 已被 ${holder//$'\n'/,} 占用，请先停掉"
+    done
+
+    if command -v nginx >/dev/null; then
+        nginx -V 2>&1 | grep -q 'stream_ssl_preread' \
+            || die "当前 nginx 不带 stream_ssl_preread 模块。可先用 add-apt-sources.sh nginx 换成 nginx.org 官方版本"
+        if grep -qE '^[[:space:]]*stream[[:space:]]*\{' /etc/nginx/nginx.conf \
+            && ! grep -qF "${NGX_STREAM_DIR}/*.conf" /etc/nginx/nginx.conf; then
+            die "nginx.conf 已有 stream 块，请在其中加入: include ${NGX_STREAM_DIR}/*.conf; 后重跑"
+        fi
+
+        # http 块里监听 ${WEB_PORT} 的站点要挪到 ${INNER_HTTPS}，否则和 stream 抢端口
+        mapfile -t NGX_HTTPS_FILES < <(
+            nginx -T 2>/dev/null | awk -v port="$WEB_PORT" '
+                /^# configuration file .*:$/ { f = $4; sub(/:$/, "", f); next }
+                f !~ /stream\.d/ && $0 !~ /quic/ &&
+                $0 ~ "^[[:space:]]*listen[[:space:]]+([0-9.]+:|\\*:|\\[::\\]:)?" port "([^0-9]|$)" { print f }
+            ' | sort -u)
+        if [[ ${#NGX_HTTPS_FILES[@]} -gt 0 ]]; then
+            echo
+            c_ylw "以下 nginx 配置在 http 中监听 ${WEB_PORT}，需改为 ${INNER_HTTPS}（并加 proxy_protocol）："
+            printf '    %s\n' "${NGX_HTTPS_FILES[@]}"
+            echo "自动改写会先把 /etc/nginx 整体备份，nginx -t 不通过则自动还原。"
+            read -rp "自动改写？[y/N] " REWRITE_HTTPS
+            [[ "${REWRITE_HTTPS,,}" == "y" ]] || die "请手动改为 listen ${INNER_HTTPS} ssl proxy_protocol; 后重跑"
+            REWRITE_HTTPS="y"
+        fi
+    fi
 fi
 
 echo
@@ -242,6 +319,11 @@ else
     printf '  统一端口     : %s  → 公网开放（Web / tsh / agent 隧道共用）\n' "$WEB_PORT"
 fi
 printf '  Auth 端口    : 3025 → 仅本机\n'
+if [[ "$USE_NGINX" == "y" ]]; then
+    printf '  nginx 接管   : 是（Teleport 改听 %s，其他 HTTPS 站点改听 %s）\n' "$INNER_WEB" "$INNER_HTTPS"
+    [[ "$LISTEN_MODE" == "separate" ]] \
+        && printf '  nginx 白名单 : %s\n' "${ALLOW_RAW:-（不限制）}"
+fi
 printf '  证书方式     : %s\n' "$CERT_MODE"
 printf '  证书有效期   : %s\n' "$SESSION_TTL"
 printf '  Teleport 版本: %s\n' "$VERSION"
@@ -250,20 +332,36 @@ read -rp "开始安装？[y/N] " go
 [[ "${go,,}" == "y" ]] || { echo "已取消"; exit 0; }
 echo
 
+STEPS=5; [[ "$USE_NGINX" == "y" ]] && STEPS=6
+
 # ============================================================ 安装 Teleport
 
 if command -v teleport >/dev/null; then
-    c_grn "[1/5] Teleport 已安装: $(teleport version | head -1)"
+    c_grn "[1/${STEPS}] Teleport 已安装: $(teleport version | head -1)"
 else
-    c_bld "[1/5] 安装 Teleport ${VERSION}…"
+    c_bld "[1/${STEPS}] 安装 Teleport ${VERSION}…"
     curl -fsSL https://cdn.teleport.dev/install.sh | bash -s "$VERSION"
     command -v teleport >/dev/null || die "安装失败"
     c_grn "      $(teleport version | head -1)"
 fi
 
+if [[ "$USE_NGINX" == "y" ]] && ! command -v nginx >/dev/null; then
+    c_bld "      安装 nginx…"
+    apt-get update -qq
+    apt-get install -y -qq nginx
+fi
+if [[ "$USE_NGINX" == "y" ]]; then
+    # 发行版自带 nginx 的 stream 是动态模块，需单独安装
+    if nginx -V 2>&1 | grep -q 'with-stream=dynamic'; then
+        apt-get install -y -qq libnginx-mod-stream
+    fi
+    nginx -V 2>&1 | grep -q 'stream_ssl_preread' \
+        || die "nginx 不带 stream_ssl_preread 模块。可先用 add-apt-sources.sh nginx 换成 nginx.org 官方版本"
+fi
+
 # ============================================================ 证书
 
-c_bld "[2/5] 准备证书…"
+c_bld "[2/${STEPS}] 准备证书…"
 if [[ "$CERT_MODE" == "1" ]]; then
     if [[ -f "$CERT_FILE" ]]; then
         c_grn "      证书已存在，跳过申请"
@@ -290,7 +388,7 @@ fi
 
 # ============================================================ 写配置
 
-c_bld "[3/5] 写入 ${CONFIG}…"
+c_bld "[3/${STEPS}] 写入 ${CONFIG}…"
 [[ -f "$CONFIG" ]] && cp "$CONFIG" "${CONFIG}.bak.$(date +%s)"
 
 {
@@ -343,11 +441,45 @@ cat <<EOF
 
 proxy_service:
   enabled: true
+EOF
+
+if [[ "$USE_NGINX" == "y" ]]; then
+cat <<EOF
+  # on: 必须带 PROXY 头。前置 nginx 以 PROXY 协议传递真实客户端 IP；
+  #     下面各监听只绑 127.0.0.1，外部无法直连伪造 PROXY 头
+  proxy_protocol: on
+
+EOF
+else
+cat <<EOF
   proxy_protocol: off
 
 EOF
+fi
 
-if [[ "$LISTEN_MODE" == "separate" ]]; then
+if [[ "$USE_NGINX" == "y" && "$LISTEN_MODE" == "separate" ]]; then
+cat <<EOF
+  # 以下监听均由 nginx 从公网端口转发过来（见 ${NGX_STREAM_CONF}）
+  # ${WEB_PORT} → ${INNER_WEB}: Web UI / tsh login（白名单由 nginx 执行）
+  web_listen_addr: ${INNER_WEB}
+  # ${SSH_PORT} → ${INNER_SSH}: tsh SSH 会话（白名单由 nginx 执行）
+  listen_addr: ${INNER_SSH}
+  # ${TUN_PORT} → ${INNER_TUN}: agent 反向隧道（公网开放）
+  tunnel_listen_addr: ${INNER_TUN}
+
+  public_addr: ${DOMAIN}:${WEB_PORT}
+  # 不设 ssh_public_addr 会退回机器 hostname，导致「登录成功但连不上节点」
+  ssh_public_addr: ${DOMAIN}:${SSH_PORT}
+  # 告知 agent 隧道入口，使其全程不经 ${WEB_PORT}
+  tunnel_public_addr: ${DOMAIN}:${TUN_PORT}
+EOF
+elif [[ "$USE_NGINX" == "y" ]]; then
+cat <<EOF
+  # ${WEB_PORT} → ${INNER_WEB}: 由 nginx 按 SNI 转发，Web / tsh / agent 隧道全部复用
+  web_listen_addr: ${INNER_WEB}
+  public_addr: ${DOMAIN}:${WEB_PORT}
+EOF
+elif [[ "$LISTEN_MODE" == "separate" ]]; then
 cat <<EOF
   # ${WEB_PORT}: Web UI / tsh login   → 防火墙仅放行开发者白名单 IP
   web_listen_addr: 0.0.0.0:${WEB_PORT}
@@ -403,7 +535,7 @@ c_grn "      完成"
 
 # ============================================================ 启动
 
-c_bld "[4/5] 启动服务…"
+c_bld "[4/${STEPS}] 启动服务…"
 systemctl daemon-reload
 systemctl enable teleport >/dev/null 2>&1
 systemctl restart teleport
@@ -419,15 +551,177 @@ if ! systemctl is-active --quiet teleport; then
 fi
 c_grn "      运行中"
 
+# ============================================================ nginx
+
+if [[ "$USE_NGINX" == "y" ]]; then
+    c_bld "[5/${STEPS}] 配置 nginx…"
+
+    NGX_BACKUP="/root/nginx-backup-$(date +%s).tar.gz"
+    tar -czf "$NGX_BACKUP" -C / etc/nginx
+    c_grn "      已备份 /etc/nginx → ${NGX_BACKUP}"
+
+    ngx_restore() {
+        rm -rf /etc/nginx && tar -xzf "$NGX_BACKUP" -C /
+        c_red "      nginx 配置有误，已还原备份"
+        die "$1"
+    }
+
+    # 其他 HTTPS 站点挪到 ${INNER_HTTPS}，由 stream 以 PROXY 协议转入
+    if [[ "$REWRITE_HTTPS" == "y" ]]; then
+        for f in "${NGX_HTTPS_FILES[@]}"; do
+            sed -i -E \
+                -e "/quic/!s/^([[:space:]]*)(listen[[:space:]]+\[::\]:${WEB_PORT}([^0-9;][^;]*)?;)/\1# 已由 nginx stream 接管: \2/" \
+                -e "/quic/!s/^([[:space:]]*)listen[[:space:]]+([0-9.]+:|\*:)?${WEB_PORT}([^0-9;][^;]*)?;/\1listen ${INNER_HTTPS}\3 proxy_protocol;/" \
+                "$f"
+            c_grn "      已改写 ${f}"
+        done
+    fi
+
+    # 让 HTTPS 站点从 PROXY 头取真实 IP（只信任本机 stream 转入的连接）
+    cat > "$NGX_REALIP_CONF" <<'EOF'
+# 由 install-teleport-server.sh 生成：443 经 nginx stream 以 PROXY 协议转入，
+# 从 PROXY 头恢复真实客户端 IP。只对来自本机的连接生效，不影响 80 端口站点。
+set_real_ip_from 127.0.0.1;
+real_ip_header proxy_protocol;
+EOF
+
+    # 白名单（geo 格式）
+    {
+        echo "# Teleport 开发者白名单，由 install-teleport-server.sh 生成"
+        echo "# 格式: <IP 或 CIDR> 1;   修改后执行 nginx -t && nginx -s reload"
+        echo "# default 1 = 不限制；default 0 = 仅放行下方列出的地址"
+        if [[ -z "$ALLOW_RAW" ]]; then
+            echo "default 1;"
+        else
+            echo "default 0;"
+            IFS=',' read -ra ARR <<< "$ALLOW_RAW"
+            for ip in "${ARR[@]}"; do
+                ip="$(echo "$ip" | xargs)"; [[ -z "$ip" ]] && continue
+                echo "${ip} 1;"
+            done
+        fi
+    } > "$NGX_ALLOW_FILE"
+
+    # 本机开启了 IPv6 才监听 [::]，否则 nginx 启动报错
+    listen_v6() { [[ -f /proc/net/if_inet6 ]] && echo "    listen [::]:$1;"; true; }
+
+    mkdir -p "$NGX_STREAM_DIR"
+    {
+    cat <<EOF
+# 由 install-teleport-server.sh 生成（被 nginx.conf 中的 stream 块 include）
+# 四层转发，不解密 TLS；向后端发送 PROXY 协议头以传递真实客户端 IP
+
+# Teleport 的 SNI：自身域名、子域名（应用访问）、集群内部名
+map \$ssl_preread_server_name \$teleport_sni {
+    hostnames;
+    .${DOMAIN}  1;
+    .teleport.cluster.local   1;
+    default                   0;
+}
+
+# default 与名单都在 include 文件里
+geo \$teleport_allow {
+    include ${NGX_ALLOW_FILE};
+}
+
+map "\$teleport_sni\$teleport_allow" \$teleport_web_upstream {
+    "11"    ${INNER_WEB};     # Teleport 且在白名单
+    "10"    ${INNER_DENY};    # Teleport 但不在白名单 → 断开
+    default ${INNER_HTTPS};   # 其他域名 → nginx 自身 HTTPS 站点
+}
+
+server {
+    listen ${WEB_PORT};
+$(listen_v6 "$WEB_PORT")
+    ssl_preread    on;
+    proxy_pass     \$teleport_web_upstream;
+    proxy_protocol on;
+    # 默认 10m 空闲即断，SSH 会话与 agent 隧道需要更长
+    proxy_timeout  1h;
+}
+
+# 白名单外的连接：直接关闭
+server {
+    listen ${INNER_DENY};
+    return "";
+}
+EOF
+
+    if [[ "$LISTEN_MODE" == "separate" ]]; then
+    cat <<EOF
+
+map \$teleport_allow \$teleport_ssh_upstream {
+    1       ${INNER_SSH};
+    default ${INNER_DENY};
+}
+
+# tsh SSH 会话（白名单）
+server {
+    listen ${SSH_PORT};
+$(listen_v6 "$SSH_PORT")
+    proxy_pass     \$teleport_ssh_upstream;
+    proxy_protocol on;
+    proxy_timeout  1h;
+}
+
+# agent 反向隧道（公网开放）
+server {
+    listen ${TUN_PORT};
+$(listen_v6 "$TUN_PORT")
+    proxy_pass     ${INNER_TUN};
+    proxy_protocol on;
+    proxy_timeout  1h;
+}
+EOF
+    fi
+    } > "$NGX_STREAM_CONF"
+
+    # stream 块必须在 http 块之外，追加到 nginx.conf 末尾
+    if ! grep -qF "${NGX_STREAM_DIR}/*.conf" /etc/nginx/nginx.conf; then
+        cat >> /etc/nginx/nginx.conf <<EOF
+
+# Teleport：四层 SNI 分流（由 install-teleport-server.sh 添加）
+stream {
+    include ${NGX_STREAM_DIR}/*.conf;
+}
+EOF
+    fi
+
+    nginx -t 2>&1 | sed 's/^/      /' || true
+    nginx -t >/dev/null 2>&1 || ngx_restore "nginx -t 未通过，见上方输出"
+
+    # 端口归属在 http / stream 之间转移，reload 可能抢不到端口，直接 restart
+    systemctl enable nginx >/dev/null 2>&1
+    systemctl restart nginx
+    sleep 2
+    systemctl is-active --quiet nginx || die "nginx 启动失败，查看: journalctl -u nginx -n 40"
+    c_grn "      完成"
+fi
+
 # ============================================================ 验证
 
-c_bld "[5/5] 端口自检…"
+c_bld "[${STEPS}/${STEPS}] 端口自检…"
 echo
 sleep 3
-ss -tlnp 2>/dev/null | grep -E ":${WEB_PORT}|:${SSH_PORT}|:${TUN_PORT}|:3025" \
+PORT_RE=":${WEB_PORT}|:${SSH_PORT}|:${TUN_PORT}|:3025"
+[[ "$USE_NGINX" == "y" ]] && PORT_RE+="|${INNER_WEB}|${INNER_SSH}|${INNER_TUN}|${INNER_HTTPS}"
+ss -tlnp 2>/dev/null | grep -E "$PORT_RE" \
     | sed 's/^/      /' || c_ylw "      未检测到监听，稍后用 ss -tlnp 手动确认"
 
 # ============================================================ 收尾
+
+if [[ "$USE_NGINX" == "y" ]]; then
+    FW_WEB="公网                "
+    FW_SSH="公网                "
+    FW_NOTE="   ${WEB_PORT} 与其他网站共用，只能对公网开放。开发者白名单由 nginx 执行，
+   同时作用于 Teleport 域名（${WEB_PORT}）与 ${SSH_PORT}，名单在 ${NGX_ALLOW_FILE}，
+   修改后执行 nginx -t && nginx -s reload。"
+else
+    FW_WEB="开发者白名单        "
+    FW_SSH="开发者白名单        "
+    FW_NOTE="   ${WEB_PORT} 与 ${SSH_PORT} 必须成对限制：只锁 ${WEB_PORT} 的话，持有效证书者
+   可绕过登录入口直接从 ${SSH_PORT} 建立会话。"
+fi
 
 if [[ "$LISTEN_MODE" == "multiplex" ]]; then
 cat <<EOF
@@ -488,14 +782,13 @@ $(c_bld "2. 防火墙（本脚本不配置，请自行处理）")
    端口          开放给              说明
    ----------    ----------------    --------------------------------
    22/tcp        管理员 IP           先放行，否则会锁死自己
-   ${WEB_PORT}/tcp       开发者白名单        Web UI / tsh login
-   ${SSH_PORT}/tcp      开发者白名单        tsh SSH 会话，漏放会「登录成功但连不上」
+   ${WEB_PORT}/tcp       ${FW_WEB}Web UI / tsh login
+   ${SSH_PORT}/tcp      ${FW_SSH}tsh SSH 会话，漏放会「登录成功但连不上」
    ${TUN_PORT}/tcp      公网                agent 隧道，动态 IP 无法枚举
    3025/tcp      不开放              已绑 127.0.0.1
    3022/tcp      不开放              本机节点，经 Proxy 转发
 
-   ${WEB_PORT} 与 ${SSH_PORT} 必须成对限制：只锁 ${WEB_PORT} 的话，持有效证书者
-   可绕过登录入口直接从 ${SSH_PORT} 建立会话。
+${FW_NOTE}
 
 $(c_bld "3. 加资源节点")
 
@@ -520,6 +813,18 @@ $(c_bld "5. 升级纪律")
    - 大版本不能跨级跳，须逐个大版本升级
 
 EOF
+fi
+
+if [[ "$USE_NGINX" == "y" ]]; then
+    c_bld "nginx 前置说明"
+    echo
+    echo "   stream 配置 : ${NGX_STREAM_CONF}"
+    echo "   白名单      : ${NGX_ALLOW_FILE}"
+    echo "   配置备份    : ${NGX_BACKUP}"
+    echo "   其他 HTTPS 站点须监听 ${INNER_HTTPS} ssl proxy_protocol，新增站点照此配置，"
+    echo "   不要再直接 listen ${WEB_PORT}，否则会与 stream 抢端口。"
+    echo "   Teleport 只接受带 PROXY 头的连接，本机直连 ${INNER_WEB} 做健康检查会失败，属正常。"
+    echo
 fi
 
 if [[ "$CERT_MODE" == "1" ]]; then
