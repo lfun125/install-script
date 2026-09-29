@@ -730,7 +730,9 @@ $(c_bld "=== 安装完成 ===")
 
 $(c_bld "1. 创建管理员")
 
-   tctl users add admin --roles=editor,access --logins=root,ubuntu
+   tctl users add admin --roles=editor,access,auditor --logins=root,ubuntu
+
+   editor: 管理集群配置  access: 登录资源  auditor: 查看审计日志与会话录像
 
 $(c_bld "2. 防火墙（本脚本不配置，请自行处理）")
 
@@ -772,7 +774,9 @@ $(c_bld "=== 安装完成 ===")
 
 $(c_bld "1. 创建管理员")
 
-   tctl users add admin --roles=editor,access --logins=root,ubuntu
+   tctl users add admin --roles=editor,access,auditor --logins=root,ubuntu
+
+   editor: 管理集群配置  access: 登录资源  auditor: 查看审计日志与会话录像
 
    输出的注册链接需从「白名单 IP」的浏览器打开。防火墙生效后其他 IP 会
    超时，容易误判成服务未启动。
