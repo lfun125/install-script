@@ -411,6 +411,20 @@ menu "【7/9】新建仓库默认可见性" 2 \
     "私有 (private)"
 [[ "$MENU_CHOICE" == "2" ]] && DEFAULT_PRIVATE="private" || DEFAULT_PRIVATE="public"
 
+menu "【7/9】登录验证码" 2 \
+    "不启用" \
+    "Cloudflare Turnstile —— 登录与注册都需通过人机验证"
+CF_TURNSTILE_SITEKEY=""; CF_TURNSTILE_SECRET=""
+if [[ "$MENU_CHOICE" == "2" ]]; then
+    ENABLE_CAPTCHA="true"
+    c_dim "  在 https://dash.cloudflare.com/?to=/:account/turnstile 添加站点获取密钥，"
+    c_dim "  Hostname 需包含 ${DOMAIN}（否则验证总是失败，导致无法登录）"
+    while [[ -z "$CF_TURNSTILE_SITEKEY" ]]; do ask CF_TURNSTILE_SITEKEY "  Site Key"; done
+    while [[ -z "$CF_TURNSTILE_SECRET"  ]]; do ask_secret CF_TURNSTILE_SECRET "  Secret Key"; done
+else
+    ENABLE_CAPTCHA="false"
+fi
+
 # ============================================================ 8. 数据目录
 
 echo
@@ -475,6 +489,7 @@ printf '  Git SSH      : %s\n' "${SSH_DESC[$SSH_MODE]}"
 printf '  注册         : %s\n' "$([[ "$DISABLE_REGISTRATION" == "true" ]] && echo '已关闭' || echo '开放')"
 printf '  匿名浏览     : %s\n' "$([[ "$REQUIRE_SIGNIN" == "true" ]] && echo '禁止（整站私有）' || echo '允许')"
 printf '  新仓库默认   : %s\n' "$DEFAULT_PRIVATE"
+printf '  登录验证码   : %s\n' "$([[ "$ENABLE_CAPTCHA" == "true" ]] && echo 'Cloudflare Turnstile' || echo '不启用')"
 printf '  数据目录     : %s\n' "$DATA_ROOT"
 printf '  管理员       : %s\n' "$([[ "$ADMIN_CREATE" == "yes" ]] && echo "$ADMIN_USER <$ADMIN_MAIL>" || echo '稍后在网页创建')"
 c_bld "======================================"
@@ -519,10 +534,12 @@ services:
       - GITEA__server__SSH_PORT=${SSH_PORT}
       - GITEA__server__SSH_LISTEN_PORT=${SSH_LISTEN_PORT}
       - GITEA__server__LFS_START_SERVER=true
+      - GITEA__server__LANDING_PAGE=login
       - GITEA__security__INSTALL_LOCK=true
       - GITEA__service__DISABLE_REGISTRATION=${DISABLE_REGISTRATION}
       - GITEA__service__REQUIRE_SIGNIN_VIEW=${REQUIRE_SIGNIN}
       - GITEA__repository__DEFAULT_PRIVATE=${DEFAULT_PRIVATE}
+      - GITEA__service__ENABLE_CAPTCHA=${ENABLE_CAPTCHA}
       - GITEA__database__DB_TYPE=${DB_TYPE}
 EOF
 
@@ -537,6 +554,16 @@ cat <<EOF
       - GITEA__database__NAME=${DB_NAME}
       - GITEA__database__USER=${DB_USER}
       - GITEA__database__PASSWD=${DB_PASS}
+EOF
+fi
+
+if [[ "$ENABLE_CAPTCHA" == "true" ]]; then
+cat <<EOF
+      - GITEA__service__REQUIRE_CAPTCHA_FOR_LOGIN=true
+      - GITEA__service__REQUIRE_EXTERNAL_REGISTRATION_CAPTCHA=true
+      - GITEA__service__CAPTCHA_TYPE=cfturnstile
+      - GITEA__service__CF_TURNSTILE_SITEKEY=${CF_TURNSTILE_SITEKEY}
+      - GITEA__service__CF_TURNSTILE_SECRET=${CF_TURNSTILE_SECRET}
 EOF
 fi
 
@@ -840,6 +867,8 @@ SSH_LISTEN_PORT  = ${SSH_LISTEN_PORT}
 SSH_DOMAIN       = ${DOMAIN}
 LFS_START_SERVER = true
 LFS_JWT_SECRET   = ${LFS_JWT_SECRET}
+# 未登录访问首页时跳转到登录页（已登录用户照常进入个人面板）
+LANDING_PAGE     = login
 OFFLINE_MODE     = true
 EOF
 
@@ -900,7 +929,13 @@ REQUIRE_SIGNIN_VIEW             = ${REQUIRE_SIGNIN}
 REGISTER_EMAIL_CONFIRM          = false
 ENABLE_NOTIFY_MAIL              = false
 ALLOW_ONLY_EXTERNAL_REGISTRATION = false
-ENABLE_CAPTCHA                  = false
+ENABLE_CAPTCHA                  = ${ENABLE_CAPTCHA}
+; 验证码同时作用于登录与第三方账号注册（Cloudflare Turnstile）
+REQUIRE_CAPTCHA_FOR_LOGIN       = ${ENABLE_CAPTCHA}
+REQUIRE_EXTERNAL_REGISTRATION_CAPTCHA = ${ENABLE_CAPTCHA}
+CAPTCHA_TYPE                    = cfturnstile
+CF_TURNSTILE_SITEKEY            = ${CF_TURNSTILE_SITEKEY}
+CF_TURNSTILE_SECRET             = ${CF_TURNSTILE_SECRET}
 DEFAULT_KEEP_EMAIL_PRIVATE      = true
 DEFAULT_ALLOW_CREATE_ORGANIZATION = true
 DEFAULT_ENABLE_TIMETRACKING     = true
