@@ -7,7 +7,7 @@
 - 自动下载安装最新版 webhook
 - 生成 deploy token 用于鉴权
 - 支持部署单个服务或全部服务
-- 服务白名单校验，防止非法调用
+- 服务白名单校验，支持设置 `*` 允许任意服务
 - 部署结果通过 HTTP 响应直接返回（包含容器状态、镜像信息）
 - 自动配置 systemd 服务，开机自启
 - 支持 GitHub 镜像加速（国内环境）
@@ -49,7 +49,7 @@ sudo ./install-webhook.sh install --mirror https://ghfast.top
 | `-p, --port PORT` | 监听端口 | `9000` |
 | `-t, --token TOKEN` | 部署密钥 | 自动生成 |
 | `-d, --dir DIR` | docker-compose 目录 | `/home/USER` |
-| `-s, --services SERVICES` | 允许的服务名，逗号分隔 | `api,web,worker,gateway` |
+| `-s, --services SERVICES` | 允许的服务名，逗号分隔；`*` 表示允许全部 | `api,web,worker,gateway` |
 | `-m, --mirror URL` | GitHub 镜像加速前缀 | 无（直连 GitHub） |
 
 ### 安装示例
@@ -60,6 +60,9 @@ sudo ./install-webhook.sh install -u deploy -p 8080
 
 # 自定义允许的服务列表
 sudo ./install-webhook.sh install -s "api,web,im-server"
+
+# 允许更新指定 Compose 目录中的任意服务
+sudo ./install-webhook.sh install --dir /opt/app --services "*"
 
 # 国内镜像 + 自定义配置
 sudo ./install-webhook.sh install --mirror https://ghfast.top -u deploy -p 8080
@@ -72,6 +75,8 @@ sudo ./install-webhook.sh install \
   --dir /opt/app \
   --services "api,web"
 ```
+
+交互式安装时，“允许的服务名”可直接输入 `*`；命令行参数中的 `*` 必须加引号，避免被 Shell 展开为文件名。该设置取消单服务部署接口的白名单限制，范围仍为 `--dir` 指定的 Compose 项目。调用单服务接口时仍需传入具体的 `service` 名称；一次更新全部服务请使用 `deploy-all` 接口，该接口本身不受单服务白名单限制。
 
 ## API 接口
 

@@ -55,7 +55,7 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
     -t, --token TOKEN         部署密钥 (默认: 随机生成)
         --token-source SOURCE 密钥传递位置: header / url (终端安装时询问，默认: header)
     -d, --dir DIR             docker-compose 目录 (默认: /home/USER)
-    -s, --services SERVICES   允许的服务名，逗号分隔 (默认: api,web,worker,gateway)
+    -s, --services SERVICES   允许的服务名，逗号分隔；* 表示允许全部 (默认: api,web,worker,gateway)
     -m, --mirror URL          GitHub 镜像加速前缀，国内推荐 https://ghfast.top
     -l, --local PATH          使用本地 webhook tar.gz 文件安装（跳过下载）
 
@@ -73,6 +73,9 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
 
     # 自定义配置安装
     $0 install -u deploy -p 8080 -s "api,web,im-server"
+
+    # 允许部署指定 Compose 目录中的任意服务（* 必须加引号）
+    $0 install -s "*"
 
     # 通过 URL 参数 token 传递部署密钥
     $0 install --token-source url --token mytoken123
@@ -192,7 +195,7 @@ prompt_install_config() {
     default_compose_dir="${COMPOSE_DIR:-/home/${WEBHOOK_USER}}"
     read_with_default "docker-compose 目录" "$default_compose_dir" COMPOSE_DIR
 
-    read_with_default "允许的服务名（逗号分隔）" "$ALLOWED_SERVICES" ALLOWED_SERVICES
+    read_with_default "允许的服务名（逗号分隔，* 表示允许全部）" "$ALLOWED_SERVICES" ALLOWED_SERVICES
 
     DEPLOY_TOKEN="${DEPLOY_TOKEN:-$(generate_token)}"
     read_with_default "部署密钥" "$DEPLOY_TOKEN" DEPLOY_TOKEN
@@ -642,7 +645,7 @@ SERVICE_NAME=$1
 LOG_FILE="WEBHOOK_DIR_PLACEHOLDER/deploy.log"
 COMPOSE_DIR="COMPOSE_DIR_PLACEHOLDER"
 
-# 允许的服务白名单
+# 允许的服务白名单，* 表示允许当前 Compose 目录中的任意服务
 IFS=',' read -ra ALLOWED_SERVICES <<< "ALLOWED_SERVICES_PLACEHOLDER"
 
 log() {
@@ -656,9 +659,16 @@ if [[ -z "$SERVICE_NAME" ]]; then
     exit 1
 fi
 
+# 防止服务名被 Docker Compose 解析为命令选项
+if [[ "$SERVICE_NAME" == -* ]]; then
+    log "ERROR: 无效的服务名: $SERVICE_NAME"
+    echo "ERROR: 无效的服务名: $SERVICE_NAME"
+    exit 1
+fi
+
 VALID=false
 for svc in "${ALLOWED_SERVICES[@]}"; do
-    if [[ "$svc" == "$SERVICE_NAME" ]]; then
+    if [[ "$svc" == "*" || "$svc" == "$SERVICE_NAME" ]]; then
         VALID=true
         break
     fi
