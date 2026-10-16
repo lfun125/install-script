@@ -1,4 +1,6 @@
 #!/bin/bash
+# 从 GitHub 执行（在 root 用户的 Bash 中运行）：
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/init-install.sh)
 
 # Debian 初始化脚本
 # 需要以 root 权限运行
@@ -347,6 +349,3 @@ main() {
 }
 
 main
-
-
-# bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/init-install.sh)

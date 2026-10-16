@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# 从 GitHub 执行（在 root 用户的 Bash 中运行）：
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-teleport-server.sh)
 #
 # ==============================================================================
 #  Teleport 服务端安装脚本（Auth + Proxy + 本机 Node 三合一）
@@ -835,5 +837,3 @@ if [[ "$CERT_MODE" == "1" ]]; then
     c_ylw "证书续期自检： certbot renew --dry-run"
     echo
 fi
-
-# bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-teleport-server.sh)

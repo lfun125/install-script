@@ -1,3 +1,21 @@
+<!--
+从 GitHub 执行（在 root 用户的 Bash 中运行）：
+Debian 初始化：
+bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/init-install.sh)
+Webhook 安装：
+bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-webhook.sh)
+Gitea 安装：
+bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-gitea.sh)
+Teleport 服务端安装：
+bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-teleport-server.sh)
+Teleport Agent 安装：
+bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-teleport-agent.sh)
+添加 APT 源：
+bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/add-apt-sources.sh)
+Teleport 清理（删除现有安装和数据）：
+bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/teleport-cleanup.sh)
+-->
+
 # Webhook 一键部署脚本
 
 用于生产环境的 [adnanh/webhook](https://github.com/adnanh/webhook) 一键安装/卸载脚本，配合 docker-compose 实现通过 HTTP 请求触发自动部署，并返回部署结果和详细日志。
@@ -25,7 +43,7 @@
 # 下载脚本
 chmod +x install-webhook.sh
 
-# 使用默认配置安装
+# 在 docker-compose 文件所在目录使用默认配置安装
 sudo ./install-webhook.sh install
 
 # 国内环境使用镜像加速
@@ -48,7 +66,7 @@ sudo ./install-webhook.sh install --mirror https://ghfast.top
 | `-u, --user USER` | 运行用户 | `apiuser` |
 | `-p, --port PORT` | 监听端口 | `9000` |
 | `-t, --token TOKEN` | 部署密钥 | 自动生成 |
-| `-d, --dir DIR` | docker-compose 目录 | `/home/USER` |
+| `-d, --dir DIR` | docker-compose 目录，配置和部署脚本保存在其 `webhook/` 下 | 当前目录 |
 | `-s, --services SERVICES` | 允许的服务名，逗号分隔；`*` 表示允许全部 | `api,web,worker,gateway` |
 | `-m, --mirror URL` | GitHub 镜像加速前缀 | 无（直连 GitHub） |
 
@@ -112,15 +130,21 @@ curl "http://YOUR_SERVER_IP:9000/hooks/deploy-all?token=YOUR_TOKEN"
 
 ## 安装后的文件结构
 
+配置、部署脚本和部署日志统一保存在 Compose 目录下的 `webhook/` 子目录，与运行用户的家目录无关。`--dir` 支持绝对路径和相对路径；未指定时使用运行安装命令时的当前目录。
+
 ```
 /usr/local/bin/webhook                  # webhook 二进制文件
 /etc/systemd/system/webhook.service     # systemd 服务文件
-/home/<USER>/webhook/
-  ├── hooks.json                        # webhook 路由配置
-  ├── deploy.sh                         # 单服务部署脚本
-  ├── deploy-all.sh                     # 全量部署脚本
-  └── deploy.log                        # 部署日志
+<COMPOSE_DIR>/
+  ├── compose.yaml                      # 现有的 Compose 文件（也可使用 docker-compose.yml 等名称）
+  └── webhook/
+      ├── hooks.json                    # webhook 路由配置
+      ├── deploy.sh                     # 单服务部署脚本
+      ├── deploy-all.sh                 # 全量部署脚本
+      └── deploy.log                    # 部署日志
 ```
+
+例如 `--dir /opt/app` 会将配置和部署脚本安装到 `/opt/app/webhook/`，systemd 服务的工作目录也设置为 `/opt/app`。重新安装旧版本时会在新目录生成配置并更新服务；旧的 `/home/<USER>/webhook/` 目录保留，确认新服务正常后可手动清理。
 
 ## 管理命令
 
@@ -135,7 +159,7 @@ systemctl restart webhook
 journalctl -u webhook -f
 
 # 查看部署日志
-tail -f /home/<USER>/webhook/deploy.log
+tail -f /opt/app/webhook/deploy.log  # 假设安装时指定 --dir /opt/app
 ```
 
 ## 卸载
@@ -144,7 +168,7 @@ tail -f /home/<USER>/webhook/deploy.log
 sudo ./install-webhook.sh uninstall
 ```
 
-卸载会删除二进制文件和 systemd 服务，但保留配置目录（`/home/<USER>/webhook`），如需清理请手动删除。
+卸载会删除二进制文件和 systemd 服务，但保留配置目录（`<COMPOSE_DIR>/webhook`），如需清理请手动删除。状态查询和卸载默认从已安装的 systemd 服务读取目录，也可通过 `--dir` 指定 Compose 目录。
 
 ## 国内镜像说明
 

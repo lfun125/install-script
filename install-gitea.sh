@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
+# 从 GitHub 执行（在 root 用户的 Bash 中运行）：
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-gitea.sh)
 #
 # ==============================================================================
 #  Gitea 一键安装脚本（交互式）
-#
-#  直接从 GitHub 运行（推荐，进程替换不占用 stdin，菜单交互正常）：
-#
-#      sudo bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-gitea.sh)
 #
 #  或先下载再运行：
 #

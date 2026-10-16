@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# 从 GitHub 执行清理（在 root 用户的 Bash 中运行）：
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/teleport-cleanup.sh)
 # 彻底清理 Teleport 节点安装（deb 包 / 二进制安装 / teleport-update 托管更新）
 set -u
 

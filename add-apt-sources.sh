@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# 从 GitHub 执行（在 root 用户的 Bash 中运行）：
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/add-apt-sources.sh)
 #
 # 根据当前系统（Ubuntu / Debian + 发行代号）添加官方 APT 源：
 #
@@ -12,9 +14,6 @@
 #   sudo bash add-apt-sources.sh                    # 交互选择要添加的源
 #   sudo bash add-apt-sources.sh nginx mysql        # 只添加指定的源
 #   sudo bash add-apt-sources.sh all                # 全部添加
-#
-# 从 GitHub 执行：
-#   bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/add-apt-sources.sh) all
 #
 # 可选环境变量：
 #   NGINX_BRANCH=stable|mainline     nginx 分支，默认 stable

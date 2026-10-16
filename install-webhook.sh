@@ -1,4 +1,6 @@
 #!/bin/bash
+# 从 GitHub 执行（在 root 用户的 Bash 中运行）：
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-webhook.sh)
 set -e
 
 #===============================================
@@ -54,7 +56,7 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
     -p, --port PORT           监听端口 (默认: 9000)
     -t, --token TOKEN         部署密钥 (默认: 随机生成)
         --token-source SOURCE 密钥传递位置: header / url (终端安装时询问，默认: header)
-    -d, --dir DIR             docker-compose 目录 (默认: /home/USER)
+    -d, --dir DIR             docker-compose 目录，配置和部署脚本保存在其 webhook/ 下 (默认: 当前目录)
     -s, --services SERVICES   允许的服务名，逗号分隔；* 表示允许全部 (默认: api,web,worker,gateway)
     -m, --mirror URL          GitHub 镜像加速前缀，国内推荐 https://ghfast.top
     -l, --local PATH          使用本地 webhook tar.gz 文件安装（跳过下载）
@@ -192,7 +194,7 @@ prompt_install_config() {
     read_with_default "运行用户" "$WEBHOOK_USER" WEBHOOK_USER
     read_with_default "监听端口" "$WEBHOOK_PORT" WEBHOOK_PORT
 
-    default_compose_dir="${COMPOSE_DIR:-/home/${WEBHOOK_USER}}"
+    default_compose_dir="${COMPOSE_DIR:-$PWD}"
     read_with_default "docker-compose 目录" "$default_compose_dir" COMPOSE_DIR
 
     read_with_default "允许的服务名（逗号分隔，* 表示允许全部）" "$ALLOWED_SERVICES" ALLOWED_SERVICES
@@ -240,7 +242,7 @@ prompt_download_config() {
 prompt_uninstall_config() {
     echo ""
     echo -e "${BLUE}=== 卸载参数 ===${NC}"
-    read_with_default "运行用户（用于提示配置目录）" "$WEBHOOK_USER" WEBHOOK_USER
+    read_with_default "docker-compose 目录" "$(get_compose_dir)" COMPOSE_DIR
 }
 
 run_interactive() {
@@ -275,7 +277,7 @@ finalize_install_config() {
     esac
 
     if [[ -z "$COMPOSE_DIR" ]]; then
-        COMPOSE_DIR="/home/${WEBHOOK_USER}"
+        COMPOSE_DIR="$PWD"
     fi
 
     if [[ -z "$DEPLOY_TOKEN" ]]; then
@@ -357,7 +359,22 @@ check_root() {
 #===============================================
 # 查看状态
 #===============================================
+get_compose_dir() {
+    local service_dir
+
+    if [[ -n "$COMPOSE_DIR" ]]; then
+        printf '%s\n' "$COMPOSE_DIR"
+        return
+    fi
+
+    # 从已安装服务读取目录，也兼容旧版使用用户家目录的服务。
+    service_dir=$(systemctl show webhook --property=WorkingDirectory --value 2>/dev/null || true)
+    printf '%s\n' "${service_dir:-$PWD}"
+}
+
 do_status() {
+    local webhook_dir="$(get_compose_dir)/webhook"
+
     echo ""
     echo -e "${BLUE}=== Webhook 状态 ===${NC}"
     echo ""
@@ -380,11 +397,9 @@ do_status() {
     
     # 检查配置文件
     echo ""
-    for user_home in /home/*; do
-        if [[ -f "${user_home}/webhook/hooks.json" ]]; then
-            info "配置目录: ${user_home}/webhook"
-        fi
-    done
+    if [[ -f "${webhook_dir}/hooks.json" ]]; then
+        info "配置目录: ${webhook_dir}"
+    fi
     
     echo ""
 }
@@ -436,6 +451,7 @@ do_download() {
 #===============================================
 do_uninstall() {
     check_root
+    local webhook_dir="$(get_compose_dir)/webhook"
     
     echo ""
     warn "即将卸载 webhook，这将删除:"
@@ -478,7 +494,7 @@ do_uninstall() {
     info "webhook 已卸载"
     echo ""
     warn "配置目录未删除，如需删除请手动执行:"
-    echo "  rm -rf /home/${WEBHOOK_USER}/webhook"
+    printf '  rm -rf -- %q\n' "$webhook_dir"
     echo ""
 }
 
@@ -514,6 +530,10 @@ do_install() {
         mkdir -p "$COMPOSE_DIR"
         chown "${WEBHOOK_USER}:${WEBHOOK_USER}" "$COMPOSE_DIR"
     fi
+
+    # systemd 和 hooks.json 需要绝对路径，避免相对路径依赖启动位置。
+    COMPOSE_DIR=$(cd "$COMPOSE_DIR" && pwd -P)
+    WEBHOOK_DIR="${COMPOSE_DIR%/}/webhook"
     
     # 检测架构
     ARCH="$(detect_arch)" || error "不支持的架构: $(uname -m)"
@@ -585,7 +605,6 @@ do_install() {
     info "安装完成: $(webhook -version 2>&1)"
     
     # 创建配置目录
-    WEBHOOK_DIR="/home/${WEBHOOK_USER}/webhook"
     info "创建配置目录: $WEBHOOK_DIR"
     mkdir -p "$WEBHOOK_DIR"
     
@@ -832,8 +851,8 @@ After=network.target docker.service
 Type=simple
 User=${WEBHOOK_USER}
 Group=${WEBHOOK_USER}
-WorkingDirectory=/home/${WEBHOOK_USER}
-ExecStart=/usr/local/bin/webhook -hooks ${WEBHOOK_DIR}/hooks.json -verbose -port ${WEBHOOK_PORT}
+WorkingDirectory="${COMPOSE_DIR}"
+ExecStart=/usr/local/bin/webhook -hooks "${WEBHOOK_DIR}/hooks.json" -verbose -port ${WEBHOOK_PORT}
 Restart=on-failure
 RestartSec=5
 
@@ -935,5 +954,3 @@ main() {
 }
 
 main "$@"
-
-# bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-webhook.sh)

@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
+# 从 GitHub 执行（在 root 用户的 Bash 中运行）：
+#   bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-teleport-agent.sh)
 #
 # Teleport Agent 交互式安装脚本
 #
 #   sudo bash install-teleport-agent.sh
 #   sudo env DEFAULT_PROXY="teleport.example.com:3024" DEFAULT_TOKEN="your-token" bash install-teleport-agent.sh
-#
-# 从 GitHub 执行（在 root 用户的 Bash 中运行）：
-#   bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-teleport-agent.sh)
 #
 # 从 GitHub 执行并设置默认值（Proxy 和令牌提示处回车使用，也可输入新值覆盖）：
 #   DEFAULT_PROXY='teleport.example.com:3024' DEFAULT_TOKEN='your-token' \
