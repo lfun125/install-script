@@ -29,7 +29,11 @@ DEPLOY_TOKEN=""
 TOKEN_SOURCE=""
 TOKEN_NAME=""
 COMPOSE_DIR=""
-ALLOWED_SERVICES="api,web,worker,gateway"
+CONFIG_DIR=""
+DEFAULT_CONFIG_DIR="/etc/webhook"
+LOG_DIR="/var/log/webhook"
+SERVICE_FILE="/etc/systemd/system/webhook.service"
+ALLOWED_SERVICES="*"
 GITHUB_MIRROR=""
 LOCAL_PACKAGE=""
 DOWNLOAD_ARCH=""
@@ -56,8 +60,9 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
     -p, --port PORT           监听端口 (默认: 9000)
     -t, --token TOKEN         部署密钥 (默认: 随机生成)
         --token-source SOURCE 密钥传递位置: header / url (终端安装时询问，默认: header)
-    -d, --dir DIR             docker-compose 目录，配置和部署脚本保存在其 webhook/ 下 (默认: 当前目录)
-    -s, --services SERVICES   允许的服务名，逗号分隔；* 表示允许全部 (默认: api,web,worker,gateway)
+    -d, --dir DIR             docker-compose 目录，部署时以运行用户在此目录执行 (默认: 运行用户家目录)
+    -c, --config-dir DIR      hooks.json 和部署脚本目录 (默认: /etc/webhook)
+    -s, --services SERVICES   允许的服务名，逗号分隔；* 表示允许全部 (默认: *)
     -m, --mirror URL          GitHub 镜像加速前缀，国内推荐 https://ghfast.top
     -l, --local PATH          使用本地 webhook tar.gz 文件安装（跳过下载）
 
@@ -73,11 +78,8 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
     # 使用默认配置安装
     $0 install
 
-    # 自定义配置安装
+    # 自定义配置安装（-s 限制只允许部署指定服务）
     $0 install -u deploy -p 8080 -s "api,web,im-server"
-
-    # 允许部署指定 Compose 目录中的任意服务（* 必须加引号）
-    $0 install -s "*"
 
     # 通过 URL 参数 token 传递部署密钥
     $0 install --token-source url --token mytoken123
@@ -93,7 +95,7 @@ ${GREEN}Webhook 一键安装/卸载脚本${NC}
     $0 install --local /tmp/webhook-linux-amd64.tar.gz
 
     # 指定所有参数
-    $0 install --user apiuser --port 9000 --token mytoken123 --dir /opt/app --services "api,web"
+    $0 install --user apiuser --port 9000 --token mytoken123 --dir /home/apiuser --config-dir /etc/webhook --services "api,web"
 
     # 卸载
     $0 uninstall
@@ -155,6 +157,12 @@ detect_arch() {
     normalize_arch "$(uname -m)"
 }
 
+get_user_home() {
+    local home
+    home=$(getent passwd "$1" 2>/dev/null | cut -d: -f6)
+    printf '%s\n' "${home:-/home/$1}"
+}
+
 prompt_action() {
     while true; do
         echo ""
@@ -194,8 +202,9 @@ prompt_install_config() {
     read_with_default "运行用户" "$WEBHOOK_USER" WEBHOOK_USER
     read_with_default "监听端口" "$WEBHOOK_PORT" WEBHOOK_PORT
 
-    default_compose_dir="${COMPOSE_DIR:-$PWD}"
-    read_with_default "docker-compose 目录" "$default_compose_dir" COMPOSE_DIR
+    default_compose_dir="${COMPOSE_DIR:-$(get_user_home "$WEBHOOK_USER")}"
+    read_with_default "docker-compose 目录（以运行用户在此执行 docker compose）" "$default_compose_dir" COMPOSE_DIR
+    read_with_default "hooks 配置目录" "${CONFIG_DIR:-$DEFAULT_CONFIG_DIR}" CONFIG_DIR
 
     read_with_default "允许的服务名（逗号分隔，* 表示允许全部）" "$ALLOWED_SERVICES" ALLOWED_SERVICES
 
@@ -242,7 +251,7 @@ prompt_download_config() {
 prompt_uninstall_config() {
     echo ""
     echo -e "${BLUE}=== 卸载参数 ===${NC}"
-    read_with_default "docker-compose 目录" "$(get_compose_dir)" COMPOSE_DIR
+    read_with_default "hooks 配置目录" "$(get_config_dir)" CONFIG_DIR
 }
 
 run_interactive() {
@@ -277,7 +286,11 @@ finalize_install_config() {
     esac
 
     if [[ -z "$COMPOSE_DIR" ]]; then
-        COMPOSE_DIR="$PWD"
+        COMPOSE_DIR="$(get_user_home "$WEBHOOK_USER")"
+    fi
+
+    if [[ -z "$CONFIG_DIR" ]]; then
+        CONFIG_DIR="$DEFAULT_CONFIG_DIR"
     fi
 
     if [[ -z "$DEPLOY_TOKEN" ]]; then
@@ -324,6 +337,10 @@ parse_args() {
                 COMPOSE_DIR="$2"
                 shift 2
                 ;;
+            -c|--config-dir)
+                CONFIG_DIR="$2"
+                shift 2
+                ;;
             -s|--services)
                 ALLOWED_SERVICES="$2"
                 shift 2
@@ -359,21 +376,27 @@ check_root() {
 #===============================================
 # 查看状态
 #===============================================
-get_compose_dir() {
-    local service_dir
+get_config_dir() {
+    local hooks_file
 
-    if [[ -n "$COMPOSE_DIR" ]]; then
-        printf '%s\n' "$COMPOSE_DIR"
+    if [[ -n "$CONFIG_DIR" ]]; then
+        printf '%s\n' "$CONFIG_DIR"
         return
     fi
 
-    # 从已安装服务读取目录，也兼容旧版使用用户家目录的服务。
-    service_dir=$(systemctl show webhook --property=WorkingDirectory --value 2>/dev/null || true)
-    printf '%s\n' "${service_dir:-$PWD}"
+    # 从已安装服务的 -hooks 参数读取配置目录，兼容旧版放在 Compose 目录下的安装。
+    if [[ -f "$SERVICE_FILE" ]]; then
+        hooks_file=$(sed -n 's/.*-hooks "\([^"]*\)".*/\1/p' "$SERVICE_FILE" | head -n 1)
+    fi
+    if [[ -n "$hooks_file" ]]; then
+        dirname "$hooks_file"
+    else
+        printf '%s\n' "$DEFAULT_CONFIG_DIR"
+    fi
 }
 
 do_status() {
-    local webhook_dir="$(get_compose_dir)/webhook"
+    local webhook_dir="$(get_config_dir)"
 
     echo ""
     echo -e "${BLUE}=== Webhook 状态 ===${NC}"
@@ -451,8 +474,8 @@ do_download() {
 #===============================================
 do_uninstall() {
     check_root
-    local webhook_dir="$(get_compose_dir)/webhook"
-    
+    local webhook_dir="$(get_config_dir)"
+
     echo ""
     warn "即将卸载 webhook，这将删除:"
     echo "  - /usr/local/bin/webhook"
@@ -493,8 +516,8 @@ do_uninstall() {
     echo ""
     info "webhook 已卸载"
     echo ""
-    warn "配置目录未删除，如需删除请手动执行:"
-    printf '  rm -rf -- %q\n' "$webhook_dir"
+    warn "配置目录和部署日志未删除，如需删除请手动执行:"
+    printf '  rm -rf -- %q %q\n' "$webhook_dir" "$LOG_DIR"
     echo ""
 }
 
@@ -511,15 +534,22 @@ do_install() {
     echo "  用户: ${WEBHOOK_USER}"
     echo "  端口: ${WEBHOOK_PORT}"
     echo "  Compose目录: ${COMPOSE_DIR}"
+    echo "  配置目录: ${CONFIG_DIR}"
+    echo "  日志目录: ${LOG_DIR}"
     echo "  允许的服务: ${ALLOWED_SERVICES}"
     echo "  密钥传递位置: ${TOKEN_SOURCE} (${TOKEN_NAME})"
     echo ""
-    
+
     # 检查用户是否存在
     if ! id "$WEBHOOK_USER" &>/dev/null; then
         error "用户 $WEBHOOK_USER 不存在"
     fi
-    
+
+    # 部署脚本以运行用户执行 docker compose，需要 docker 组权限
+    if ! id -nG "$WEBHOOK_USER" | tr ' ' '\n' | grep -qx docker; then
+        warn "用户 $WEBHOOK_USER 不在 docker 组，部署时将无权限访问 Docker，可执行: usermod -aG docker $WEBHOOK_USER"
+    fi
+
     # 检查 compose 目录
     if [[ ! -d "$COMPOSE_DIR" ]]; then
         warn "目录 $COMPOSE_DIR 不存在，是否创建？[Y/n]"
@@ -533,8 +563,15 @@ do_install() {
 
     # systemd 和 hooks.json 需要绝对路径，避免相对路径依赖启动位置。
     COMPOSE_DIR=$(cd "$COMPOSE_DIR" && pwd -P)
-    WEBHOOK_DIR="${COMPOSE_DIR%/}/webhook"
-    
+    mkdir -p "$CONFIG_DIR"
+    CONFIG_DIR=$(cd "$CONFIG_DIR" && pwd -P)
+    CONFIG_DIR="${CONFIG_DIR%/}"
+    USER_HOME=$(get_user_home "$WEBHOOK_USER")
+
+    if [[ "$CONFIG_DIR/" == "${USER_HOME%/}/"* ]]; then
+        warn "配置目录 $CONFIG_DIR 位于用户家目录下，运行用户可修改部署密钥和部署脚本，建议使用 $DEFAULT_CONFIG_DIR"
+    fi
+
     # 检测架构
     ARCH="$(detect_arch)" || error "不支持的架构: $(uname -m)"
 
@@ -604,17 +641,24 @@ do_install() {
 
     info "安装完成: $(webhook -version 2>&1)"
     
-    # 创建配置目录
-    info "创建配置目录: $WEBHOOK_DIR"
-    mkdir -p "$WEBHOOK_DIR"
-    
+    # 配置目录归 root 所有，运行用户只读，避免被篡改密钥和部署脚本
+    info "配置目录: $CONFIG_DIR"
+    chown "root:${WEBHOOK_USER}" "$CONFIG_DIR"
+    chmod 750 "$CONFIG_DIR"
+
+    # 部署日志需要运行用户可写
+    info "创建日志目录: $LOG_DIR"
+    mkdir -p "$LOG_DIR"
+    chown "${WEBHOOK_USER}:${WEBHOOK_USER}" "$LOG_DIR"
+    chmod 750 "$LOG_DIR"
+
     # 创建 hooks.json（添加输出返回配置）
     info "创建 hooks.json..."
-    cat > "${WEBHOOK_DIR}/hooks.json" << EOF
+    cat > "${CONFIG_DIR}/hooks.json" << EOF
 [
   {
     "id": "deploy",
-    "execute-command": "${WEBHOOK_DIR}/deploy.sh",
+    "execute-command": "${CONFIG_DIR}/deploy.sh",
     "command-working-directory": "${COMPOSE_DIR}",
     "include-command-output-in-response": true,
     "include-command-output-in-response-on-error": true,
@@ -637,7 +681,7 @@ do_install() {
   },
   {
     "id": "deploy-all",
-    "execute-command": "${WEBHOOK_DIR}/deploy-all.sh",
+    "execute-command": "${CONFIG_DIR}/deploy-all.sh",
     "command-working-directory": "${COMPOSE_DIR}",
     "include-command-output-in-response": true,
     "include-command-output-in-response-on-error": true,
@@ -657,11 +701,11 @@ EOF
 
     # 创建部署脚本（单服务）- 详细版本
     info "创建 deploy.sh..."
-    cat > "${WEBHOOK_DIR}/deploy.sh" << 'DEPLOY_SCRIPT'
+    cat > "${CONFIG_DIR}/deploy.sh" << 'DEPLOY_SCRIPT'
 #!/bin/bash
 
 SERVICE_NAME=$1
-LOG_FILE="WEBHOOK_DIR_PLACEHOLDER/deploy.log"
+LOG_FILE="LOG_DIR_PLACEHOLDER/deploy.log"
 COMPOSE_DIR="COMPOSE_DIR_PLACEHOLDER"
 
 # 允许的服务白名单，* 表示允许当前 Compose 目录中的任意服务
@@ -763,16 +807,16 @@ log "========== 部署结束 =========="
 DEPLOY_SCRIPT
 
     # 替换占位符
-    sed -i "s|WEBHOOK_DIR_PLACEHOLDER|${WEBHOOK_DIR}|g" "${WEBHOOK_DIR}/deploy.sh"
-    sed -i "s|COMPOSE_DIR_PLACEHOLDER|${COMPOSE_DIR}|g" "${WEBHOOK_DIR}/deploy.sh"
-    sed -i "s|ALLOWED_SERVICES_PLACEHOLDER|${ALLOWED_SERVICES}|g" "${WEBHOOK_DIR}/deploy.sh"
+    sed -i "s|LOG_DIR_PLACEHOLDER|${LOG_DIR}|g" "${CONFIG_DIR}/deploy.sh"
+    sed -i "s|COMPOSE_DIR_PLACEHOLDER|${COMPOSE_DIR}|g" "${CONFIG_DIR}/deploy.sh"
+    sed -i "s|ALLOWED_SERVICES_PLACEHOLDER|${ALLOWED_SERVICES}|g" "${CONFIG_DIR}/deploy.sh"
 
     # 创建部署脚本（全部服务）- 详细版本
     info "创建 deploy-all.sh..."
-    cat > "${WEBHOOK_DIR}/deploy-all.sh" << DEPLOY_ALL_SCRIPT
+    cat > "${CONFIG_DIR}/deploy-all.sh" << DEPLOY_ALL_SCRIPT
 #!/bin/bash
 
-LOG_FILE="${WEBHOOK_DIR}/deploy.log"
+LOG_FILE="${LOG_DIR}/deploy.log"
 COMPOSE_DIR="${COMPOSE_DIR}"
 
 log() {
@@ -834,15 +878,14 @@ echo "SUCCESS: 所有服务部署完成"
 log "========== 部署结束 =========="
 DEPLOY_ALL_SCRIPT
 
-    chmod +x "${WEBHOOK_DIR}/deploy.sh"
-    chmod +x "${WEBHOOK_DIR}/deploy-all.sh"
-    
-    # 设置权限
-    chown -R "${WEBHOOK_USER}:${WEBHOOK_USER}" "$WEBHOOK_DIR"
-    
+    # 设置权限：root 所有，运行用户可读（hooks.json）和执行（部署脚本）
+    chown "root:${WEBHOOK_USER}" "${CONFIG_DIR}/hooks.json" "${CONFIG_DIR}/deploy.sh" "${CONFIG_DIR}/deploy-all.sh"
+    chmod 640 "${CONFIG_DIR}/hooks.json"
+    chmod 750 "${CONFIG_DIR}/deploy.sh" "${CONFIG_DIR}/deploy-all.sh"
+
     # 创建 systemd 服务
     info "配置 systemd 服务..."
-    cat > /etc/systemd/system/webhook.service << EOF
+    cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=Webhook Server
 After=network.target docker.service
@@ -851,8 +894,9 @@ After=network.target docker.service
 Type=simple
 User=${WEBHOOK_USER}
 Group=${WEBHOOK_USER}
-WorkingDirectory="${COMPOSE_DIR}"
-ExecStart=/usr/local/bin/webhook -hooks "${WEBHOOK_DIR}/hooks.json" -verbose -port ${WEBHOOK_PORT}
+Environment="HOME=${USER_HOME}"
+WorkingDirectory=${COMPOSE_DIR}
+ExecStart=/usr/local/bin/webhook -hooks "${CONFIG_DIR}/hooks.json" -verbose -port ${WEBHOOK_PORT}
 Restart=on-failure
 RestartSec=5
 
@@ -882,8 +926,9 @@ EOF
     echo "  - 版本: ${LATEST_VERSION}"
     echo "  - 端口: ${WEBHOOK_PORT}"
     echo "  - 用户: ${WEBHOOK_USER}"
-    echo "  - 配置目录: ${WEBHOOK_DIR}"
+    echo "  - 配置目录: ${CONFIG_DIR}"
     echo "  - Compose目录: ${COMPOSE_DIR}"
+    echo "  - 部署日志: ${LOG_DIR}/deploy.log"
     echo "  - 密钥传递位置: ${TOKEN_SOURCE} (${TOKEN_NAME})"
     echo ""
     echo -e "${YELLOW}部署密钥 (请妥善保存):${NC}"
@@ -914,7 +959,7 @@ EOF
     echo "  systemctl status webhook   # 查看状态"
     echo "  systemctl restart webhook  # 重启服务"
     echo "  journalctl -u webhook -f   # 查看日志"
-    echo "  tail -f ${WEBHOOK_DIR}/deploy.log  # 部署日志"
+    echo "  tail -f ${LOG_DIR}/deploy.log  # 部署日志"
     echo ""
     echo "=============================================="
 }

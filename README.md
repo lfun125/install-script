@@ -43,7 +43,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/
 # 下载脚本
 chmod +x install-webhook.sh
 
-# 在 docker-compose 文件所在目录使用默认配置安装
+# 使用默认配置安装（Compose 目录为运行用户家目录，如 /home/apiuser）
 sudo ./install-webhook.sh install
 
 # 国内环境使用镜像加速
@@ -66,8 +66,9 @@ sudo ./install-webhook.sh install --mirror https://ghfast.top
 | `-u, --user USER` | 运行用户 | `apiuser` |
 | `-p, --port PORT` | 监听端口 | `9000` |
 | `-t, --token TOKEN` | 部署密钥 | 自动生成 |
-| `-d, --dir DIR` | docker-compose 目录，配置和部署脚本保存在其 `webhook/` 下 | 当前目录 |
-| `-s, --services SERVICES` | 允许的服务名，逗号分隔；`*` 表示允许全部 | `api,web,worker,gateway` |
+| `-d, --dir DIR` | docker-compose 目录，部署时以运行用户在此目录执行 `docker compose up -d --pull always <服务>` | 运行用户家目录 |
+| `-c, --config-dir DIR` | hooks.json 和部署脚本目录 | `/etc/webhook` |
+| `-s, --services SERVICES` | 允许的服务名，逗号分隔；`*` 表示允许全部 | `*` |
 | `-m, --mirror URL` | GitHub 镜像加速前缀 | 无（直连 GitHub） |
 
 ### 安装示例
@@ -76,11 +77,11 @@ sudo ./install-webhook.sh install --mirror https://ghfast.top
 # 自定义用户和端口
 sudo ./install-webhook.sh install -u deploy -p 8080
 
-# 自定义允许的服务列表
+# 限制只允许部署指定服务（默认 * 允许全部）
 sudo ./install-webhook.sh install -s "api,web,im-server"
 
-# 允许更新指定 Compose 目录中的任意服务
-sudo ./install-webhook.sh install --dir /opt/app --services "*"
+# 指定其他 Compose 目录
+sudo ./install-webhook.sh install --dir /opt/app
 
 # 国内镜像 + 自定义配置
 sudo ./install-webhook.sh install --mirror https://ghfast.top -u deploy -p 8080
@@ -90,11 +91,12 @@ sudo ./install-webhook.sh install \
   --user apiuser \
   --port 9000 \
   --token mytoken123 \
-  --dir /opt/app \
+  --dir /home/apiuser \
+  --config-dir /etc/webhook \
   --services "api,web"
 ```
 
-交互式安装时，“允许的服务名”可直接输入 `*`；命令行参数中的 `*` 必须加引号，避免被 Shell 展开为文件名。该设置取消单服务部署接口的白名单限制，范围仍为 `--dir` 指定的 Compose 项目。调用单服务接口时仍需传入具体的 `service` 名称；一次更新全部服务请使用 `deploy-all` 接口，该接口本身不受单服务白名单限制。
+“允许的服务名”默认为 `*`；如需显式传入，命令行参数中的 `*` 必须加引号，避免被 Shell 展开为文件名。`*` 取消单服务部署接口的白名单限制，范围仍为 `--dir` 指定的 Compose 项目。调用单服务接口时仍需传入具体的 `service` 名称；一次更新全部服务请使用 `deploy-all` 接口，该接口本身不受单服务白名单限制。
 
 ## API 接口
 
@@ -130,21 +132,24 @@ curl "http://YOUR_SERVER_IP:9000/hooks/deploy-all?token=YOUR_TOKEN"
 
 ## 安装后的文件结构
 
-配置、部署脚本和部署日志统一保存在 Compose 目录下的 `webhook/` 子目录，与运行用户的家目录无关。`--dir` 支持绝对路径和相对路径；未指定时使用运行安装命令时的当前目录。
+webhook 服务以运行用户（默认 `apiuser`）身份运行，部署时在 Compose 目录（默认为运行用户家目录，如 `/home/apiuser`）执行 `docker compose`，因此使用的是该用户的 Docker 登录信息（`~/.docker/config.json`）。运行用户需在 `docker` 组中，否则安装时会给出提示。
+
+hooks 配置和部署脚本不放在运行用户家目录，默认保存在 `/etc/webhook/`，归 root 所有，运行用户只读，避免部署密钥和脚本被篡改；部署日志写入 `/var/log/webhook/`。
 
 ```
 /usr/local/bin/webhook                  # webhook 二进制文件
-/etc/systemd/system/webhook.service     # systemd 服务文件
-<COMPOSE_DIR>/
-  ├── compose.yaml                      # 现有的 Compose 文件（也可使用 docker-compose.yml 等名称）
-  └── webhook/
-      ├── hooks.json                    # webhook 路由配置
-      ├── deploy.sh                     # 单服务部署脚本
-      ├── deploy-all.sh                 # 全量部署脚本
-      └── deploy.log                    # 部署日志
+/etc/systemd/system/webhook.service     # systemd 服务文件（WorkingDirectory 为 Compose 目录）
+/etc/webhook/                           # 配置目录，root:apiuser 750
+  ├── hooks.json                        # webhook 路由配置（640）
+  ├── deploy.sh                         # 单服务部署脚本（750）
+  └── deploy-all.sh                     # 全量部署脚本（750）
+/var/log/webhook/
+  └── deploy.log                        # 部署日志
+/home/apiuser/                          # Compose 目录
+  └── compose.yaml                      # 现有的 Compose 文件（也可使用 docker-compose.yml 等名称）
 ```
 
-例如 `--dir /opt/app` 会将配置和部署脚本安装到 `/opt/app/webhook/`，systemd 服务的工作目录也设置为 `/opt/app`。重新安装旧版本时会在新目录生成配置并更新服务；旧的 `/home/<USER>/webhook/` 目录保留，确认新服务正常后可手动清理。
+重新安装旧版本时会在新目录生成配置并更新服务；旧的 `<COMPOSE_DIR>/webhook/` 目录保留，确认新服务正常后可手动清理。
 
 ## 管理命令
 
@@ -159,7 +164,7 @@ systemctl restart webhook
 journalctl -u webhook -f
 
 # 查看部署日志
-tail -f /opt/app/webhook/deploy.log  # 假设安装时指定 --dir /opt/app
+tail -f /var/log/webhook/deploy.log
 ```
 
 ## 卸载
@@ -168,7 +173,7 @@ tail -f /opt/app/webhook/deploy.log  # 假设安装时指定 --dir /opt/app
 sudo ./install-webhook.sh uninstall
 ```
 
-卸载会删除二进制文件和 systemd 服务，但保留配置目录（`<COMPOSE_DIR>/webhook`），如需清理请手动删除。状态查询和卸载默认从已安装的 systemd 服务读取目录，也可通过 `--dir` 指定 Compose 目录。
+卸载会删除二进制文件和 systemd 服务，但保留配置目录（默认 `/etc/webhook`）和日志目录（`/var/log/webhook`），如需清理请手动删除。状态查询和卸载默认从已安装的 systemd 服务读取配置目录，也可通过 `--config-dir` 指定。
 
 ## 国内镜像说明
 
