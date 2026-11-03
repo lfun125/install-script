@@ -11,7 +11,7 @@
 #   DEFAULT_PROXY='teleport.example.com:3024' DEFAULT_TOKEN='your-token' \
 #     bash <(curl -fsSL https://raw.githubusercontent.com/lfun125/install-script/refs/heads/main/install-teleport-agent.sh)
 #
-# 会依次询问 proxy_server / token / labels / nodename / 版本，
+# 会依次询问 proxy_server / token / labels / nodename / 版本（默认自动从 proxy 检测），
 # 然后安装 Teleport、写配置、加入集群并验证。
 #
 
@@ -84,9 +84,27 @@ DEFAULT_NODENAME="$(hostname -s)"
 read -rp "节点名 [${DEFAULT_NODENAME}]: " NODENAME
 NODENAME="${NODENAME:-$DEFAULT_NODENAME}"
 
+# 官方 install.sh 已强制要求传入版本号，且 agent 版本须与服务端一致：
+# 先尝试从 proxy 的 /webapi/ping 自动获取服务端版本（仅读取版本号，故用 -k）
+PROXY_HOST="${PROXY_SERVER%:*}"
+DETECTED_VERSION=""
+for url in "https://${PROXY_HOST}/webapi/ping" "https://${PROXY_HOST}:3080/webapi/ping"; do
+    DETECTED_VERSION="$(curl -fsSk --max-time 5 "$url" 2>/dev/null \
+        | grep -o '"server_version":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+    [[ -n "$DETECTED_VERSION" ]] && break
+done
+
 echo
-echo "版本需与服务端一致，服务端上执行 'teleport version' 查看"
-read -rp "Teleport 版本 (留空装最新): " VERSION
+if [[ -n "$DETECTED_VERSION" ]]; then
+    echo "已从 proxy 检测到服务端版本: ${DETECTED_VERSION}"
+    read -rp "Teleport 版本 [${DETECTED_VERSION}]: " VERSION
+    VERSION="${VERSION:-$DETECTED_VERSION}"
+else
+    c_ylw "未能自动获取服务端版本，请在服务端执行 'teleport version' 查看"
+    read -rp "Teleport 版本 (例如 16.2.0): " VERSION
+fi
+VERSION="${VERSION#v}"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || die "版本号格式错误: '${VERSION}'，应为 X.Y.Z"
 
 read -rp "CA pin (可选，sha256:... 留空跳过): " CA_PIN
 
@@ -114,7 +132,7 @@ c_bld "--- 请确认 ---"
 printf '  Proxy    : %s\n' "$PROXY_SERVER"
 printf '  节点名   : %s\n' "$NODENAME"
 printf '  令牌     : %s…%s\n' "${TOKEN:0:6}" "${TOKEN: -4}"
-printf '  版本     : %s\n' "${VERSION:-最新}"
+printf '  版本     : %s\n' "$VERSION"
 printf '  CA pin   : %s\n' "${CA_PIN:-（未设置）}"
 echo   '  标签     :'
 printf '%s' "$LABEL_YAML" | sed 's/^    /             /'
@@ -129,11 +147,7 @@ if command -v teleport >/dev/null; then
     c_grn "Teleport 已安装: $(teleport version | head -1)"
 else
     c_bld "[1/4] 安装 Teleport…"
-    if [[ -n "$VERSION" ]]; then
-        curl -fsSL https://cdn.teleport.dev/install.sh | bash -s "$VERSION"
-    else
-        curl -fsSL https://cdn.teleport.dev/install.sh | bash -s
-    fi
+    curl -fsSL https://cdn.teleport.dev/install.sh | bash -s "$VERSION"
     command -v teleport >/dev/null || die "安装失败"
     c_grn "      $(teleport version | head -1)"
 fi
